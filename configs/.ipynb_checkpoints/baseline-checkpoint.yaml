@@ -1,0 +1,47 @@
+seed: 1337
+exp_name: "resnet20_cifar10"
+
+# Data
+data:
+  root: "./data"
+  num_workers: 4
+  batch_size: 128
+  augment: true
+
+# Model
+model:
+  name: "resnet20_cifar"
+  num_classes: 10
+
+# Optimizer
+optim:
+  name: "sgd"
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+
+# Scheduler: one of [cosine, onecycle, step, none]
+scheduler:
+  name: "cosine"
+  t_max: 200   # used by cosine
+  step_size: 80
+  gamma: 0.1
+  pct_start: 0.1  # OneCycle
+
+# Training
+train:
+  epochs: 200
+  label_smoothing: 0.0
+  grad_clip_norm: null
+  deterministic: false
+
+# Checkpointing
+ckpt:
+  dir: "./checkpoints"
+  save_best: true
+
+# Logging
+log:
+  dir_tb: "./runs"
+  csv_path: "./outputs/baseline_metrics.csv"
+  log_interval: 100
