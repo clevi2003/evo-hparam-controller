@@ -1,7 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Any, Optional
-import wandb  # pip install wandb
+import wandb  # I assume this is pip install wandb
 from ..hook_base import Hook, State
 
 
@@ -43,7 +43,7 @@ class WandbHook(Hook):
             wandb.log(log, step=gs, commit=True)
 
     def on_train_end(self, state: State) -> None:
-        # Upload Parquet logs and checkpoints as an artifact
+        # Upload parquet logs and checkpoints as an artifact
         if self.artifacts_dir and self.artifacts_dir.exists():
             art = wandb.Artifact(name="run_artifacts", type="training-run")
             art.add_dir(str(self.artifacts_dir))
