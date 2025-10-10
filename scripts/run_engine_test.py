@@ -7,8 +7,14 @@ prints the contents of run_meta.json, config.json, and env.json to stdout.
 
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
+
+# Ensure project root is on sys.path so `from src...` works when running this script directly
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import torch
 from torch.utils.data import DataLoader, TensorDataset
