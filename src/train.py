@@ -14,6 +14,13 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, OneCycleLR
 from .data import get_dataloaders
 from .models import resnet20
 from .utils import CSVLogger, TBLogger, accuracy, seed_everything, save_checkpoint, count_params
+from src.core.logging.loggers import make_train_parquet_logger, make_val_parquet_logger, ControllerTickLogger
+
+import uuid
+import json
+import subprocess
+import sys
+from datetime import datetime
 
 
 def parse_args():
@@ -123,6 +130,54 @@ def main():
 
     exp_name = args.exp_name or cfg.get("exp_name", "run")
 
+    # Build run directory structure
+    run_id = uuid.uuid4().hex[:8]
+    start_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    runs_root = os.path.join("runs")
+    run_dir = os.path.join(runs_root, f"{start_ts}_{run_id}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    # Persist config to run folder
+    cfg_path = os.path.join(run_dir, "config.yaml")
+    with open(cfg_path, "w") as f:
+        yaml.safe_dump(cfg, f)
+
+    # Collect environment metadata
+    def _git_commit():
+        try:
+            return subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+        except Exception:
+            return ""
+
+    def _git_branch():
+        try:
+            return subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).decode().strip()
+        except Exception:
+            return ""
+
+    env = {
+        "python_version": sys.version.replace("\n", " "),
+        "torch_version": getattr(torch, "__version__", ""),
+        "cuda_version": getattr(torch.version, "cuda", None) if hasattr(torch, "version") else None,
+        "gpu_available": torch.cuda.is_available(),
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "git_commit": _git_commit(),
+        "git_branch": _git_branch(),
+        "start_time": start_ts,
+    }
+    env_path = os.path.join(run_dir, "env.json")
+    with open(env_path, "w") as f:
+        json.dump(env, f, indent=2)
+
+    run_meta = {
+        "run_id": run_id,
+        "exp_name": exp_name,
+        "run_dir": run_dir,
+        "config_path": cfg_path,
+        "env_path": env_path,
+        "env": env,
+    }
+
     seed_everything(cfg.get("seed", 1337), cfg["train"].get("deterministic", False))
 
     #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -151,11 +206,24 @@ def main():
     scheduler = build_scheduler(cfg, optimizer, steps_per_epoch)
 
     # Logging
+    # TensorBoard and CSV
     tb = TBLogger(cfg["log"]["dir_tb"], exp_name)
     csv_logger = CSVLogger(cfg["log"]["csv_path"])
 
+    # Structured Parquet loggers colocated in the run folder
+    train_parquet_path = os.path.join(run_dir, "Logs_train.parquet")
+    val_parquet_dir = os.path.join(run_dir, "logs_val")
+    os.makedirs(val_parquet_dir, exist_ok=True)
+    val_parquet_path = os.path.join(val_parquet_dir, "test.parquet")
+
+    train_parquet_logger = make_train_parquet_logger(train_parquet_path)
+    val_parquet_logger = make_val_parquet_logger(val_parquet_path)
+    controller_logger = ControllerTickLogger.to_parquet(os.path.join(run_dir, "Controller_calls.parquet"))
+
     best_acc = 0.0
-    ckpt_dir = os.path.join(cfg["ckpt"]["dir"], exp_name)
+    # Put checkpoints under the run folder
+    ckpt_dir = os.path.join(run_dir, "Checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
 
     for epoch in range(1, cfg["train"]["epochs"] + 1):
         t0 = time.time()
@@ -178,7 +246,29 @@ def main():
         csv_logger.log(epoch=epoch, step=step, split="train", loss=tr_loss, acc=tr_acc, lr=optimizer.param_groups[0]["lr"])
         csv_logger.log(epoch=epoch, step=step, split="val", loss=val_loss, acc=val_acc, lr=optimizer.param_groups[0]["lr"])
 
-        # Checkpoint
+        # Parquet logging
+        try:
+            train_parquet_logger.log({
+                "global_step": int(step),
+                "epoch": int(epoch),
+                "loss": float(tr_loss),
+                "acc": float(tr_acc),
+                "lr": float(optimizer.param_groups[0]["lr"]),
+                "grad_norm": None,
+            })
+        except Exception:
+            pass
+
+        try:
+            val_parquet_logger.log({
+                "global_step": int(step),
+                "epoch": int(epoch),
+                "val_loss": float(val_loss),
+                "val_acc": float(val_acc),
+            })
+        except Exception:
+            pass
+
         if val_acc > best_acc:
             best_acc = val_acc
             save_checkpoint({
@@ -187,6 +277,7 @@ def main():
                 "optimizer_state": optimizer.state_dict(),
                 "val_acc": val_acc,
                 "config": cfg,
+                "run_meta": run_meta,
             }, ckpt_dir, "best.pt")
 
         print(f"[epoch {epoch:03d}] train_acc={tr_acc:.4f} val_acc={val_acc:.4f} time={epoch_time:.1f}s")
@@ -198,7 +289,22 @@ def main():
         "optimizer_state": optimizer.state_dict(),
         "val_acc": best_acc,
         "config": cfg,
+        "run_meta": run_meta,
     }, ckpt_dir, "last.pt")
+
+    # Close loggers
+    try:
+        train_parquet_logger.close()
+    except Exception:
+        pass
+    try:
+        val_parquet_logger.close()
+    except Exception:
+        pass
+    try:
+        controller_logger.close()
+    except Exception:
+        pass
 
     tb.close(); csv_logger.close()
 
