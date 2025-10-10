@@ -150,22 +150,15 @@ class Trainer:
                 return subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).decode().strip()
             except Exception:
                 return ""
-
         env = {
-            "python_version": sys.version.replace("\n", " "),
-            "torch_version": getattr(torch, "__version__", ""),
+            "pytorch_version": getattr(torch, "__version__", ""),
             "cuda_version": getattr(torch.version, "cuda", None) if hasattr(torch, "version") else None,
             "cudnn_version": torch.backends.cudnn.version() if torch.backends and hasattr(torch.backends, "cudnn") else None,
-            "gpu_available": torch.cuda.is_available(),
+            "gpu_model": torch.cuda.get_device_name(0) if torch.cuda.is_available() and torch.cuda.device_count() > 0 else None,
             "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-            "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() and torch.cuda.device_count() > 0 else None,
-            "git_commit": _git_commit(),
-            "git_branch": _git_branch(),
-            "start_time": start_ts,
             "mixed_precision": bool(self.mixed_precision),
         }
 
-        # run-level meta: configuration summary, model/opt/scheduler descriptors, dataset and seeds
         def _summarize_optimizer(opt):
             try:
                 return {"class": opt.__class__.__name__, "param_groups": [{k: v for k, v in pg.items() if k != "params"} for pg in opt.param_groups]}
@@ -185,13 +178,14 @@ class Trainer:
         run_meta = {
             "run_id": run_id,
             "start_time": start_ts,
-            "git_commit": env["git_commit"],
-            "git_branch": env["git_branch"],
+            "git_commit": _git_commit(),
+            "git_branch": _git_branch(),
             "config": cfg if isinstance(cfg, dict) else str(cfg),
             "dataset": dataset_name,
             "model": self.model.__class__.__name__ if hasattr(self.model, "__class__") else str(type(self.model)),
             "optimizer": _summarize_optimizer(self.optimizer) if self.optimizer is not None else None,
             "scheduler": _summarize_scheduler(self.scheduler) if self.scheduler is not None else None,
+            "controller": (cfg.get("controller") if isinstance(cfg, dict) else None),
             "batch_size": int(batch_size) if batch_size is not None else None,
             "epochs": int(self.epochs),
             "augment": (cfg.get("data", {}).get("augment") if isinstance(cfg, dict) else None),
@@ -199,14 +193,14 @@ class Trainer:
             "env": env,
         }
 
-        # persist config and run_meta to run_dir
+        # persist config (YAML) and environment/run metadata as JSON
         try:
-            cfg_path = run_dir / "config.yaml"
+            cfg_path = run_dir / "config.json"
             with cfg_path.open("w") as fh:
                 if isinstance(cfg, dict):
-                    yaml.safe_dump(cfg, fh)
+                    json.dump(cfg, fh, indent=2)
                 else:
-                    fh.write(str(cfg))
+                    json.dump({"config": str(cfg)}, fh, indent=2)
         except Exception:
             pass
 
@@ -224,19 +218,7 @@ class Trainer:
         except Exception:
             pass
 
-        train_log_path = run_dir / "Logs_train.parquet"
-        val_log_path = run_dir / "logs_val" / "test.parquet"
-        controller_log_path = run_dir / "Controller_calls.parquet"
-
-        # create parquet loggers
-        self._train_logger = make_train_parquet_logger(train_log_path)
-        self._val_logger = make_val_parquet_logger(val_log_path)
-        self._controller_logger = ControllerTickLogger.to_parquet(controller_log_path)
-
-        # expose loggers and run_meta to hooks and controllers via state
-        state["train_logger"] = self._train_logger
-        state["val_logger"] = self._val_logger
-        state["controller_logger"] = self._controller_logger
+        # expose run_meta and run_dir to hooks and controllers via state
         state["run_meta"] = run_meta
         state["run_dir"] = str(run_dir)
 
@@ -349,6 +331,25 @@ class Trainer:
 
         # Train end
         self.hooks.on_train_end(state)
+
+        # record end time and final metrics into run_meta and persist
+        try:
+            end_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            run_meta["end_time"] = end_ts
+            # summary metrics
+            run_meta["final"] = {
+                "best_val_acc": float(best_val_acc if best_val_acc != float("-inf") else (state.get("val_acc") or 0.0)),
+                "final_val_acc": float(state.get("val_acc") or 0.0),
+                "final_train_acc": float(state.get("acc") or 0.0),
+                "final_epoch": int(state.get("epoch", self.epochs - 1)),
+                "final_step": int(state.get("global_step", self.global_step)),
+            }
+            # rewrite run_meta.json
+            meta_path = run_dir / "run_meta.json"
+            with meta_path.open("w") as fh:
+                json.dump(run_meta, fh, indent=2)
+        except Exception:
+            pass
 
         # flush & close loggers
         try:
