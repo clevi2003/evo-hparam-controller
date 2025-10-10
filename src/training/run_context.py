@@ -4,7 +4,7 @@ import os
 import json
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from src.core.logging.logging_json_csv import JSONLAppender
 from src.core.logging.loggers import Logger
@@ -35,7 +35,9 @@ class RunContext:
     def __init__(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         self.cfg = cfg or {}
         run_id = os.environ.get("RUN_ID") or uuid.uuid4().hex[:8]
-        start_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        # store start as a timezone-aware datetime (UTC) for accurate duration calculation
+        self._start_dt = datetime.now(timezone.utc)
+        start_ts = self.get_time(self._start_dt)
 
         if isinstance(self.cfg, dict) and self.cfg.get("run_dir"):
             run_root = Path(self.cfg.get("run_dir"))
@@ -48,6 +50,7 @@ class RunContext:
             "run_id": run_id,
             "start_time": start_ts,
             "end_time": None,
+            "duration_seconds": None,
             "git_commit": _git_commit(),
             "git_branch": _git_branch(),
             "status": "running",
@@ -55,6 +58,21 @@ class RunContext:
 
         self.config = None
         self.env = None
+
+    def get_time(self, dt: Optional[datetime] = None) -> str:
+        """Return an ISO-like UTC timestamp with microsecond precision.
+
+        If dt is provided, it should be a timezone-aware datetime. If not,
+        the current UTC time will be used.
+        """
+        if dt is None:
+            dt = datetime.now(timezone.utc)
+        # normalize to UTC and format with Z suffix
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.strftime("%Y%m%dT%H%M%S.%fZ")
 
     def set_env(self, env):
         try:
@@ -67,16 +85,6 @@ class RunContext:
             self.config = self._to_jsonable_config(config)
         except Exception:
             self.config = str(config)
-
-    def write_env(self) -> None:
-        try:
-            p = self.run_dir / "env.jsonl"
-            lg = Logger(JSONLAppender(p, keep_fields=None))
-            lg.log(self.env)
-            lg.flush()
-            lg.close()
-        except Exception:
-            pass
 
     def build_env(self, torch_mod, mixed_precision: bool) -> Dict[str, Any]:
         """
@@ -98,15 +106,7 @@ class RunContext:
         self.set_env(env)
         return env
 
-    def write_config(self) -> None:
-        try:
-            p = self.run_dir / "config.jsonl"
-            lg = Logger(JSONLAppender(p, keep_fields=None))
-            lg.log(self.config)
-            lg.flush()
-            lg.close()
-        except Exception:
-            pass
+
 
     def build_config(self, model, optimizer, scheduler, train_loader, cfg, epochs: int):
         """Build a standard config payload and store it via set_config.
@@ -145,12 +145,46 @@ class RunContext:
         except Exception:
             pass
 
+    def write_config(self) -> None:
+        try:
+            p = self.run_dir / "config.jsonl"
+            lg = Logger(JSONLAppender(p, keep_fields=None))
+            lg.log(self.config)
+            lg.flush()
+            lg.close()
+        except Exception:
+            pass
+
+    def write_env(self) -> None:
+        try:
+            p = self.run_dir / "env.jsonl"
+            lg = Logger(JSONLAppender(p, keep_fields=None))
+            lg.log(self.env)
+            lg.flush()
+            lg.close()
+        except Exception:
+            pass
+
     def finalize(self, status: str = "finished") -> None:
         try:
-            end_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            end_dt = datetime.now(timezone.utc)
+            end_ts = self.get_time(end_dt)
             self.run_meta["end_time"] = end_ts
+            # compute duration_seconds using timezone-aware datetimes
+            try:
+                if isinstance(self._start_dt, datetime):
+                    # ensure both are timezone-aware
+                    start = self._start_dt if self._start_dt.tzinfo is not None else self._start_dt.replace(tzinfo=timezone.utc)
+                    duration = (end_dt - start).total_seconds()
+                else:
+                    duration = None
+            except Exception:
+                duration = None
+            self.run_meta["duration_seconds"] = duration
             self.run_meta["status"] = status
             self.write_meta()
+            self.write_config()
+            self.write_env()
         except Exception:
             pass
 
