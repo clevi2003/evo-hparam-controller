@@ -85,7 +85,6 @@ class Trainer:
         # move model
         self.model.to(self.device)
 
-        # logging placeholders (created lazily when fit() is called)
         self._train_logger = None
         self._val_logger = None
         self._controller_logger = None
@@ -111,7 +110,6 @@ class Trainer:
             "val_acc": None,
             "lr": get_current_lr(self.optimizer),
             "grad_norm": None,
-            # logging hooks (populated with Logger / ControllerTickLogger instances)
             "train_logger": None,
             "val_logger": None,
             "controller_logger": None,
@@ -170,7 +168,6 @@ class Trainer:
             except Exception:
                 return {"class": str(type(sched))}
 
-        # helper to make cfg JSON-serializable
         def _to_jsonable_config(c):
             try:
                 json.dumps(c)
@@ -178,7 +175,7 @@ class Trainer:
             except Exception:
                 pass
             try:
-                from omegaconf import OmegaConf  # optional path
+                from omegaconf import OmegaConf
                 if OmegaConf.is_config(c):
                     return OmegaConf.to_container(c, resolve=True)
             except Exception:
@@ -189,7 +186,6 @@ class Trainer:
         dataset_name = getattr(getattr(self.train_loader, 'dataset', None), '__class__', None)
         dataset_name = dataset_name.__name__ if dataset_name is not None else None
 
-        # RUN META (minimal spec)
         run_meta = {
             "run_id": run_id,
             "start_time": start_ts,
@@ -198,7 +194,6 @@ class Trainer:
             "git_branch": _git_branch(),
         }
 
-        # CONFIG payload (structured + full_config)
         config_payload = {
             "dataset": dataset_name,
             "model": self.model.__class__.__name__ if hasattr(self.model, "__class__") else str(type(self.model)),
@@ -212,7 +207,6 @@ class Trainer:
             "full_config": _to_jsonable_config(cfg),
         }
 
-        # write ONLY the three files
         try:
             with (run_dir / "env.json").open("w") as fh:
                 json.dump(env, fh, indent=2)
@@ -231,7 +225,6 @@ class Trainer:
         except Exception:
             pass
 
-        # expose run_meta and run_dir to hooks and controllers via state
         state["run_meta"] = run_meta
         state["run_dir"] = str(run_dir)
 
@@ -305,7 +298,6 @@ class Trainer:
                 state["lr"] = get_current_lr(self.optimizer)
                 state["grad_norm"] = compute_grad_norm(self.model)
 
-                # write per-batch train row if logger present (left intact; won't run unless logger set elsewhere)
                 if self._train_logger is not None:
                     try:
                         row = {
@@ -318,7 +310,7 @@ class Trainer:
                         }
                         self._train_logger.log(row)
                     except Exception:
-                        # non-fatal: logging failure shouldn't stop training
+                        # non-fatal: failure shouldn't stop training
                         pass
 
                 self.hooks.on_batch_end(state)
@@ -329,7 +321,6 @@ class Trainer:
                 if state["val_acc"] is not None:
                     best_val_acc = max(best_val_acc, float(state["val_acc"]))
 
-                # after validation, write a val row (left intact; won't run unless logger set elsewhere)
                 if self._val_logger is not None:
                     try:
                         vrow = {
@@ -355,7 +346,6 @@ class Trainer:
         except Exception:
             pass
 
-        # flush & close loggers (left intact; will no-op)
         try:
             if self._train_logger is not None:
                 self._train_logger.flush()
