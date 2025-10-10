@@ -121,7 +121,7 @@ class Trainer:
 
         self.hooks.on_train_start(state)
 
-        # --- initialize run metadata and loggers ---
+        # --- initialize run metadata and file-only outputs (no parquet, no extra dirs) ---
         cfg = self.cfg or {}
 
         # create a timestamped run directory unless caller provided a final run_dir
@@ -134,9 +134,6 @@ class Trainer:
         else:
             run_dir = Path(os.getcwd()) / "runs" / f"{start_ts}_{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
-        # ensure subfolders follow the canonical layout
-        (run_dir / "logs_val").mkdir(parents=True, exist_ok=True)
-        (run_dir / "Checkpoints").mkdir(parents=True, exist_ok=True)
 
         # collect run-level metadata
         def _git_commit():
@@ -150,6 +147,8 @@ class Trainer:
                 return subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).decode().strip()
             except Exception:
                 return ""
+
+        # ENV payload (exact spec)
         env = {
             "pytorch_version": getattr(torch, "__version__", ""),
             "cuda_version": getattr(torch.version, "cuda", None) if hasattr(torch, "version") else None,
@@ -171,16 +170,36 @@ class Trainer:
             except Exception:
                 return {"class": str(type(sched))}
 
+        # helper to make cfg JSON-serializable
+        def _to_jsonable_config(c):
+            try:
+                json.dumps(c)
+                return c
+            except Exception:
+                pass
+            try:
+                from omegaconf import OmegaConf  # optional path
+                if OmegaConf.is_config(c):
+                    return OmegaConf.to_container(c, resolve=True)
+            except Exception:
+                pass
+            return str(c)
+
         batch_size = getattr(self.train_loader, "batch_size", None)
         dataset_name = getattr(getattr(self.train_loader, 'dataset', None), '__class__', None)
         dataset_name = dataset_name.__name__ if dataset_name is not None else None
 
+        # RUN META (minimal spec)
         run_meta = {
             "run_id": run_id,
             "start_time": start_ts,
+            "end_time": None,
             "git_commit": _git_commit(),
             "git_branch": _git_branch(),
-            "config": cfg if isinstance(cfg, dict) else str(cfg),
+        }
+
+        # CONFIG payload (structured + full_config)
+        config_payload = {
             "dataset": dataset_name,
             "model": self.model.__class__.__name__ if hasattr(self.model, "__class__") else str(type(self.model)),
             "optimizer": _summarize_optimizer(self.optimizer) if self.optimizer is not None else None,
@@ -188,32 +207,26 @@ class Trainer:
             "controller": (cfg.get("controller") if isinstance(cfg, dict) else None),
             "batch_size": int(batch_size) if batch_size is not None else None,
             "epochs": int(self.epochs),
-            "augment": (cfg.get("data", {}).get("augment") if isinstance(cfg, dict) else None),
-            "seed": (cfg.get("seed") if isinstance(cfg, dict) else None),
-            "env": env,
+            "augmentation": (cfg.get("data", {}).get("augment") if isinstance(cfg, dict) else None),
+            "seeds": (cfg.get("seeds") if isinstance(cfg, dict) and "seeds" in cfg else cfg.get("seed") if isinstance(cfg, dict) else None),
+            "full_config": _to_jsonable_config(cfg),
         }
 
-        # persist config (YAML) and environment/run metadata as JSON
+        # write ONLY the three files
         try:
-            cfg_path = run_dir / "config.json"
-            with cfg_path.open("w") as fh:
-                if isinstance(cfg, dict):
-                    json.dump(cfg, fh, indent=2)
-                else:
-                    json.dump({"config": str(cfg)}, fh, indent=2)
-        except Exception:
-            pass
-
-        try:
-            env_path = run_dir / "env.json"
-            with env_path.open("w") as fh:
+            with (run_dir / "env.json").open("w") as fh:
                 json.dump(env, fh, indent=2)
         except Exception:
             pass
 
         try:
-            meta_path = run_dir / "run_meta.json"
-            with meta_path.open("w") as fh:
+            with (run_dir / "config.json").open("w") as fh:
+                json.dump(config_payload, fh, indent=2)
+        except Exception:
+            pass
+
+        try:
+            with (run_dir / "run_meta.json").open("w") as fh:
                 json.dump(run_meta, fh, indent=2)
         except Exception:
             pass
@@ -292,7 +305,7 @@ class Trainer:
                 state["lr"] = get_current_lr(self.optimizer)
                 state["grad_norm"] = compute_grad_norm(self.model)
 
-                # write per-batch train row if logger present
+                # write per-batch train row if logger present (left intact; won't run unless logger set elsewhere)
                 if self._train_logger is not None:
                     try:
                         row = {
@@ -316,7 +329,7 @@ class Trainer:
                 if state["val_acc"] is not None:
                     best_val_acc = max(best_val_acc, float(state["val_acc"]))
 
-                # after validation, write a val row
+                # after validation, write a val row (left intact; won't run unless logger set elsewhere)
                 if self._val_logger is not None:
                     try:
                         vrow = {
@@ -332,26 +345,17 @@ class Trainer:
         # Train end
         self.hooks.on_train_end(state)
 
-        # record end time and final metrics into run_meta and persist
+        # record end time into run_meta and persist (no metrics here; spec keeps run_meta minimal)
         try:
             end_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
             run_meta["end_time"] = end_ts
-            # summary metrics
-            run_meta["final"] = {
-                "best_val_acc": float(best_val_acc if best_val_acc != float("-inf") else (state.get("val_acc") or 0.0)),
-                "final_val_acc": float(state.get("val_acc") or 0.0),
-                "final_train_acc": float(state.get("acc") or 0.0),
-                "final_epoch": int(state.get("epoch", self.epochs - 1)),
-                "final_step": int(state.get("global_step", self.global_step)),
-            }
-            # rewrite run_meta.json
             meta_path = run_dir / "run_meta.json"
             with meta_path.open("w") as fh:
                 json.dump(run_meta, fh, indent=2)
         except Exception:
             pass
 
-        # flush & close loggers
+        # flush & close loggers (left intact; will no-op)
         try:
             if self._train_logger is not None:
                 self._train_logger.flush()
@@ -438,4 +442,3 @@ class Trainer:
                 raise ValueError("Could not unpack dict batch into (inputs, targets).")
             return x, y
         raise TypeError("Unsupported batch type; expected (inputs, targets) tuple or a dict.")
-
