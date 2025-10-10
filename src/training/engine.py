@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
 from src.utils import compute_grad_norm, detach_scalar, get_current_lr
+from src.training.run_context import RunContext
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
 
@@ -95,87 +96,100 @@ class Trainer:
             "grad_norm": None,
         }
 
+
+        # =========== Logging =============
+        cfg = self.cfg or {}
+        run_context = RunContext(cfg=cfg)
+
+        run_context.build_env(torch, bool(self.mixed_precision))
+        run_context.build_config(self.model, self.optimizer, self.scheduler, self.train_loader, cfg, self.epochs)
+        # =================================
+
         best_val_acc = float("-inf")
 
         self.hooks.on_train_start(state)
+        
+        try:
+            for epoch in range(self.epochs):
+                state["epoch"] = epoch
+                self.hooks.on_epoch_start(state)
 
-        for epoch in range(self.epochs):
-            state["epoch"] = epoch
-            self.hooks.on_epoch_start(state)
+                # Training epoch
+                self.model.train(True)
+                for batch_idx, batch in enumerate(self.train_loader):
+                    state["batch_idx"] = batch_idx
 
-            # Training epoch
-            self.model.train(True)
-            for batch_idx, batch in enumerate(self.train_loader):
-                state["batch_idx"] = batch_idx
+                    # Early-stop on max_steps budget
+                    if self.max_steps is not None and self.global_step >= self.max_steps:
+                        # run validation once at budget boundary if available
+                        if self.val_loader is not None:
+                            self._run_validation(state)
+                        self.hooks.on_train_end(state)
+                        return {
+                            "best_val_acc": float(max(best_val_acc, state.get("val_acc") or float("-inf"))),
+                            "final_val_acc": float(state.get("val_acc") or 0.0),
+                            "final_train_acc": float(state.get("acc") or 0.0),
+                            "final_epoch": epoch,
+                            "final_step": self.global_step,
+                        }
 
-                # Early-stop on max_steps budget
-                if self.max_steps is not None and self.global_step >= self.max_steps:
-                    # run validation once at budget boundary if available
-                    if self.val_loader is not None:
-                        self._run_validation(state)
-                    self.hooks.on_train_end(state)
-                    return {
-                        "best_val_acc": float(max(best_val_acc, state.get("val_acc") or float("-inf"))),
-                        "final_val_acc": float(state.get("val_acc") or 0.0),
-                        "final_train_acc": float(state.get("acc") or 0.0),
-                        "final_epoch": epoch,
-                        "final_step": self.global_step,
-                    }
+                    inputs, targets = self._unpack_batch(batch)
+                    inputs = inputs.to(self.device, non_blocking=True)
+                    targets = targets.to(self.device, non_blocking=True)
 
-                inputs, targets = self._unpack_batch(batch)
-                inputs = inputs.to(self.device, non_blocking=True)
-                targets = targets.to(self.device, non_blocking=True)
+                    self.hooks.on_batch_start(state)
 
-                self.hooks.on_batch_start(state)
+                    with torch.cuda.amp.autocast(enabled=self.mixed_precision):
+                        logits = self.model(inputs)
+                        loss = self.loss_fn(logits, targets)
 
-                with torch.cuda.amp.autocast(enabled=self.mixed_precision):
-                    logits = self.model(inputs)
-                    loss = self.loss_fn(logits, targets)
+                    # backward
+                    self.optimizer.zero_grad(set_to_none=True)
+                    if self.mixed_precision:
+                        self.scaler.scale(loss).backward()
+                        if self.grad_clip_norm is not None:
+                            self.scaler.unscale_(self.optimizer)
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        loss.backward()
+                        if self.grad_clip_norm is not None:
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                        self.optimizer.step()
 
-                # backward
-                self.optimizer.zero_grad(set_to_none=True)
-                if self.mixed_precision:
-                    self.scaler.scale(loss).backward()
-                    if self.grad_clip_norm is not None:
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    loss.backward()
-                    if self.grad_clip_norm is not None:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                    self.optimizer.step()
+                    # scheduler step
+                    if self.scheduler is not None and hasattr(self.scheduler, "step"):
+                        # Many schedulers are designed to step per-iteration; this is the common case for cosine/warmup
+                        self.scheduler.step()
 
-                # scheduler step
-                if self.scheduler is not None and hasattr(self.scheduler, "step"):
-                    # Many schedulers are designed to step per-iteration; this is the common case for cosine/warmup
-                    self.scheduler.step()
+                    # update counters
+                    self.global_step += 1
+                    state["global_step"] = self.global_step
 
-                # update counters
-                self.global_step += 1
-                state["global_step"] = self.global_step
+                    # compute metrics
+                    acc = None
+                    if self.metric_fn is not None:
+                        try:
+                            acc = self.metric_fn(logits.detach(), targets.detach())
+                        except Exception:
+                            acc = None
 
-                # compute metrics
-                acc = None
-                if self.metric_fn is not None:
-                    try:
-                        acc = self.metric_fn(logits.detach(), targets.detach())
-                    except Exception:
-                        acc = None
+                    state["loss"] = detach_scalar(loss)
+                    state["acc"] = acc
+                    state["lr"] = get_current_lr(self.optimizer)
+                    state["grad_norm"] = compute_grad_norm(self.model)
 
-                state["loss"] = detach_scalar(loss)
-                state["acc"] = acc
-                state["lr"] = get_current_lr(self.optimizer)
-                state["grad_norm"] = compute_grad_norm(self.model)
+                    self.hooks.on_batch_end(state)
 
-                self.hooks.on_batch_end(state)
-
-            # Validation at epoch end
-            if self.val_loader is not None:
-                self._run_validation(state)
-                if state["val_acc"] is not None:
-                    best_val_acc = max(best_val_acc, float(state["val_acc"]))
+                # Validation at epoch end
+                if self.val_loader is not None:
+                    self._run_validation(state)
+                    if state["val_acc"] is not None:
+                        best_val_acc = max(best_val_acc, float(state["val_acc"]))
+        finally:
+            # Write to file
+            run_context.finalize()
 
         # Train end
         self.hooks.on_train_end(state)
@@ -247,4 +261,3 @@ class Trainer:
                 raise ValueError("Could not unpack dict batch into (inputs, targets).")
             return x, y
         raise TypeError("Unsupported batch type; expected (inputs, targets) tuple or a dict.")
-
