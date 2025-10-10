@@ -6,17 +6,8 @@ import torch
 from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
 from src.utils import compute_grad_norm, detach_scalar, get_current_lr
-from src.core.logging.loggers import (
-    make_train_parquet_logger,
-    make_val_parquet_logger,
-    ControllerTickLogger,
-)
-import uuid
+from src.training.run_context import RunContext
 import json
-import subprocess
-import sys
-from datetime import datetime
-import yaml
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
 
@@ -119,118 +110,28 @@ class Trainer:
 
         self.hooks.on_train_start(state)
 
-        # --- initialize run metadata and file-only outputs (no parquet, no extra dirs) ---
-        cfg = self.cfg or {}
-
-        # create a timestamped run directory unless caller provided a final run_dir
-        run_id = uuid.uuid4().hex[:8]
-        start_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        if isinstance(cfg, dict) and cfg.get("run_dir"):
-            # treat provided run_dir as a runs root and always create a dated child folder
-            run_root = Path(cfg.get("run_dir"))
-            run_dir = run_root / f"{start_ts}_{run_id}"
-        else:
-            run_dir = Path(os.getcwd()) / "runs" / f"{start_ts}_{run_id}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        # collect run-level metadata
-        def _git_commit():
-            try:
-                return subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-            except Exception:
-                return ""
-
-        def _git_branch():
-            try:
-                return subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).decode().strip()
-            except Exception:
-                return ""
-
-        # ENV payload (exact spec)
-        env = {
-            "pytorch_version": getattr(torch, "__version__", ""),
-            "cuda_version": getattr(torch.version, "cuda", None) if hasattr(torch, "version") else None,
-            "cudnn_version": torch.backends.cudnn.version() if torch.backends and hasattr(torch.backends, "cudnn") else None,
-            "gpu_model": torch.cuda.get_device_name(0) if torch.cuda.is_available() and torch.cuda.device_count() > 0 else None,
-            "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-            "mixed_precision": bool(self.mixed_precision),
-        }
-
-        def _summarize_optimizer(opt):
-            try:
-                return {"class": opt.__class__.__name__, "param_groups": [{k: v for k, v in pg.items() if k != "params"} for pg in opt.param_groups]}
-            except Exception:
-                return {"class": str(type(opt))}
-
-        def _summarize_scheduler(sched):
-            try:
-                return {"class": sched.__class__.__name__}
-            except Exception:
-                return {"class": str(type(sched))}
-
-        def _to_jsonable_config(c):
-            try:
-                json.dumps(c)
-                return c
-            except Exception:
-                pass
-            try:
-                from omegaconf import OmegaConf
-                if OmegaConf.is_config(c):
-                    return OmegaConf.to_container(c, resolve=True)
-            except Exception:
-                pass
-            return str(c)
-
         batch_size = getattr(self.train_loader, "batch_size", None)
         dataset_name = getattr(getattr(self.train_loader, 'dataset', None), '__class__', None)
         dataset_name = dataset_name.__name__ if dataset_name is not None else None
 
-        run_meta = {
-            "run_id": run_id,
-            "start_time": start_ts,
-            "end_time": None,
-            "git_commit": _git_commit(),
-            "git_branch": _git_branch(),
-        }
+        # =========== Logging =============
+        cfg = self.cfg or {}
+        run_context = RunContext(cfg=cfg)
 
-        config_payload = {
-            "dataset": dataset_name,
-            "model": self.model.__class__.__name__ if hasattr(self.model, "__class__") else str(type(self.model)),
-            "optimizer": _summarize_optimizer(self.optimizer) if self.optimizer is not None else None,
-            "scheduler": _summarize_scheduler(self.scheduler) if self.scheduler is not None else None,
-            "controller": (cfg.get("controller") if isinstance(cfg, dict) else None),
-            "batch_size": int(batch_size) if batch_size is not None else None,
-            "epochs": int(self.epochs),
-            "augmentation": (cfg.get("data", {}).get("augment") if isinstance(cfg, dict) else None),
-            "seeds": (cfg.get("seeds") if isinstance(cfg, dict) and "seeds" in cfg else cfg.get("seed") if isinstance(cfg, dict) else None),
-            "full_config": _to_jsonable_config(cfg),
-        }
+        run_context.build_env(torch, bool(self.mixed_precision))
+        run_context.build_config(self.model, self.optimizer, self.scheduler, self.train_loader, cfg, self.epochs)
+
+        run_context.write_env()
+        run_context.write_config()
+        run_context.write_meta()
+
+        state["run_meta"] = run_context.run_meta
+        state["run_dir"] = str(run_context.run_dir)
 
         try:
-            with (run_dir / "env.json").open("w") as fh:
-                json.dump(env, fh, indent=2)
-        except Exception:
-            pass
-
-        try:
-            with (run_dir / "config.json").open("w") as fh:
-                json.dump(config_payload, fh, indent=2)
-        except Exception:
-            pass
-
-        try:
-            with (run_dir / "run_meta.json").open("w") as fh:
-                json.dump(run_meta, fh, indent=2)
-        except Exception:
-            pass
-
-        state["run_meta"] = run_meta
-        state["run_dir"] = str(run_dir)
-
-        for epoch in range(self.epochs):
-            state["epoch"] = epoch
-            self.hooks.on_epoch_start(state)
+            for epoch in range(self.epochs):
+                state["epoch"] = epoch
+                self.hooks.on_epoch_start(state)
 
             # Training epoch
             self.model.train(True)
@@ -315,36 +216,34 @@ class Trainer:
 
                 self.hooks.on_batch_end(state)
 
-            # Validation at epoch end
-            if self.val_loader is not None:
-                self._run_validation(state)
-                if state["val_acc"] is not None:
-                    best_val_acc = max(best_val_acc, float(state["val_acc"]))
+                # Validation at epoch end
+                if self.val_loader is not None:
+                    self._run_validation(state)
+                    if state["val_acc"] is not None:
+                        best_val_acc = max(best_val_acc, float(state["val_acc"]))
 
-                if self._val_logger is not None:
-                    try:
-                        vrow = {
-                            "global_step": int(self.global_step),
-                            "epoch": int(state.get("epoch") or epoch),
-                            "val_loss": float(state.get("val_loss") or 0.0),
-                            "val_acc": float(state.get("val_acc") or 0.0),
-                        }
-                        self._val_logger.log(vrow)
-                    except Exception:
-                        pass
+                    if self._val_logger is not None:
+                        try:
+                            vrow = {
+                                "global_step": int(self.global_step),
+                                "epoch": int(state.get("epoch") or epoch),
+                                "val_loss": float(state.get("val_loss") or 0.0),
+                                "val_acc": float(state.get("val_acc") or 0.0),
+                            }
+                            self._val_logger.log(vrow)
+                        except Exception:
+                            pass
 
-        # Train end
-        self.hooks.on_train_end(state)
-
-        # record end time into run_meta and persist (no metrics here; spec keeps run_meta minimal)
-        try:
-            end_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-            run_meta["end_time"] = end_ts
-            meta_path = run_dir / "run_meta.json"
-            with meta_path.open("w") as fh:
-                json.dump(run_meta, fh, indent=2)
-        except Exception:
-            pass
+            # Train end
+            self.hooks.on_train_end(state)
+            run_context.finalize(status="finished")
+        finally:
+            try:
+                if state.get("run_meta") is not None:
+                    if run_context.run_meta.get("status") != "finished":
+                        run_context.finalize(status=run_context.run_meta.get("status") or "finished")
+            except Exception:
+                pass
 
         try:
             if self._train_logger is not None:

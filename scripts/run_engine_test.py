@@ -84,13 +84,16 @@ def main():
     if candidates:
         recent = candidates[0]
         print("Run dir:", recent)
-        for fname in ["run_meta.json", "config.json", "env.json"]:
-            p = recent / fname
-            if p.exists():
-                print(f"--- {fname} ---")
-                print(p.read_text())
-            else:
-                print(f"{fname} not found in {recent}")
+        for base in ["run_meta", "config", "env"]:
+            printed = False
+            for ext in [".json", ".jsonl"]:
+                p = recent / (base + ext)
+                if p.exists():
+                    print(f"--- {base + ext} ---")
+                    print(p.read_text())
+                    printed = True
+            if not printed:
+                print(f"{base}.json/.jsonl not found in {recent}")
     else:
         print("No runs found in ./runs")
 
