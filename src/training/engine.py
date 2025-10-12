@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
 from src.utils import compute_grad_norm, detach_scalar, get_current_lr
+from src.training.run_context import RunContext
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
 
@@ -95,13 +96,23 @@ class Trainer:
             "grad_norm": None,
         }
 
+
+        # =========== Logging =============
+        cfg = self.cfg or {}
+        run_context = RunContext(cfg=cfg)
+
+        run_context.build_env(torch, bool(self.mixed_precision))
+        run_context.build_config(self.model, self.optimizer, self.scheduler, self.train_loader, cfg, self.epochs)
+        # =================================
+
         best_val_acc = float("-inf")
 
         self.hooks.on_train_start(state)
 
-        for epoch in range(self.epochs):
-            state["epoch"] = epoch
-            self.hooks.on_epoch_start(state)
+        try:
+            for epoch in range(self.epochs):
+                state["epoch"] = epoch
+                self.hooks.on_epoch_start(state)
 
             # Training epoch
             self.model.train(True)
@@ -175,11 +186,14 @@ class Trainer:
                 state.pop("logits", None)
                 state.pop("targets", None)
 
-            # Validation at epoch end
-            if self.val_loader is not None:
-                self._run_validation(state)
-                if state["val_acc"] is not None:
-                    best_val_acc = max(best_val_acc, float(state["val_acc"]))
+                # Validation at epoch end
+                if self.val_loader is not None:
+                    self._run_validation(state)
+                    if state["val_acc"] is not None:
+                        best_val_acc = max(best_val_acc, float(state["val_acc"]))
+        finally:
+            # Write to file
+            run_context.finalize()
 
         # Train end
         self.hooks.on_train_end(state)
