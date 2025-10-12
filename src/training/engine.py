@@ -130,6 +130,8 @@ class Trainer:
 
                 with torch.cuda.amp.autocast(enabled=self.mixed_precision):
                     logits = self.model(inputs)
+                    state["logits"] = logits.detach()
+                    state["targets"] = targets.detach()
                     loss = self.loss_fn(logits, targets)
 
                 # backward
@@ -170,6 +172,8 @@ class Trainer:
                 state["grad_norm"] = compute_grad_norm(self.model)
 
                 self.hooks.on_batch_end(state)
+                state.pop("logits", None)
+                state.pop("targets", None)
 
             # Validation at epoch end
             if self.val_loader is not None:
@@ -200,6 +204,8 @@ class Trainer:
             inputs = inputs.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
             logits = self.model(inputs)
+            state["logits"] = logits.detach()
+            state["targets"] = targets.detach()
             loss = self.loss_fn(logits, targets)
 
             total_loss += float(loss.item()) * targets.size(0)
@@ -218,6 +224,8 @@ class Trainer:
         # Inform hooks around validation lifecycle
         self.hooks.on_eval_start(state)
         self.hooks.on_eval_end(state)
+        state.pop("logits", None)
+        state.pop("targets", None)
 
         # switch back to train mode
         self.model.train(True)

@@ -227,7 +227,7 @@ class LrControllerScheduler:
             raise ValueError(f"Expected {self._n_groups} deltas, got {len(seq)}.")
         return [float(v) for v in seq]
 
-### bahhhh this was way more work than I thought. If you mess with the hellish param groups,
+### bahhhh this was way more work than I thought. If you mess with the param groups,
 # increment this wasted time counter:
 # Wasted Time: 3 hours
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
+
+import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import math
 import torch
 from ..core.hooks.hook_base import Hook, State
@@ -139,7 +141,8 @@ class FeatureExtractor(Hook):
         # Last values to compute deltas
         self._last_vals: Dict[str, float] = {"train_loss": 0.0, "train_acc": 0.0}
 
-        # Cached last computed feature vector (good for logging tick before/after)
+        # lightweight cache: keyed by (global_step, batch_idx)
+        self._cache_key: Optional[Tuple[int, int]] = None
         self._last_vector: Optional[torch.Tensor] = None
 
     def on_batch_end(self, state: State) -> None:
@@ -182,13 +185,23 @@ class FeatureExtractor(Hook):
         # Also mirror EMAs into state
         state["ema_loss"] = self._ema_stats["ema_loss"].mean if self._ema_stats["ema_loss"].initialized else 0.0
         state["ema_acc"] = self._ema_stats["ema_acc"].mean if self._ema_stats["ema_acc"].initialized else 0.0
+        state["ema_grad_norm"] = (
+            self._ema_stats["grad_norm"].mean if self._ema_stats["grad_norm"].initialized else 0.0
+        )
+
+        # invalidate cache if step advanced
+        key = (int(state.get("global_step", -1)), int(state.get("batch_idx", -1)))
+        if key != self._cache_key:
+            self._cache_key = key
+            self._last_vector = None
 
         # Build/cache the latest vector (so controller can call immediately)
-        self._last_vector = self.get_vector(state)
+        if self._last_vector is None:
+            self._last_vector = self.get_vector(state)
 
     def on_eval_end(self, state: State) -> None:
-        # Could update EMA trackers with val metrics if needed later.
-        # TODO idk, could be expanded later
+        # recompute cached vector to include any val_* metrics if present in spec.
+        self._cache_key = (int(state.get("global_step", -1)), int(state.get("batch_idx", -1)))
         self._last_vector = self.get_vector(state)
 
     @property
@@ -200,6 +213,9 @@ class FeatureExtractor(Hook):
         Produce a 1D float32 tensor of shape [len(spec)] on the configured device.
         Order matches self._spec.
         """
+        # return cached vector when available
+        if self._last_vector is not None:
+            return self._last_vector
         vals: List[float] = []
         for name in self._spec:
             v = self._read_feature_value(name, state)
@@ -207,7 +223,18 @@ class FeatureExtractor(Hook):
             if self._standardize and self._standardizable(name):
                 v = self._standardize_value(name, v)
             vals.append(float(v))
-        return torch.tensor(vals, dtype=torch.float32, device=self._device)
+        out = torch.tensor(vals, dtype=torch.float32, device=self._device)
+        self._last_vector = out
+        return out
+
+    def features_json(self, state: State) -> str:
+        """
+        Compact snapshot of the standardized feature vector the controller sees.
+        Returned as a JSON string: {"names":[...], "values":[...]}.
+        """
+        vec = self.get_vector(state).detach().cpu().tolist()
+        payload = {"names": self.feature_names, "values": vec}
+        return json.dumps(payload, ensure_ascii=False)
 
 
     @staticmethod

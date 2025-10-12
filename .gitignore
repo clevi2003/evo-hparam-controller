@@ -4,7 +4,7 @@
 __pycache__/
 
 # Data and outputs
-data/
+data_/
 checkpoints/
 runs/
 outputs/

@@ -56,6 +56,10 @@ class FitnessWeightsCfg:
         _ensure_positive("evolve.fitness.nan_penalty", self.nan_penalty, allow_zero=False)
         _ensure_positive("evolve.fitness.lr_volatility_weight", self.lr_volatility_weight, allow_zero=True)
 
+@dataclass
+class EvolveLoggingCfg:
+    artifacts: bool = True # write per-candidate parquet artifacts (can be disabled for speed)
+
 
 @dataclass
 class EvolveCfg:
@@ -63,6 +67,7 @@ class EvolveCfg:
     budget: BudgetCfg = field(default_factory=BudgetCfg)
     fitness: FitnessWeightsCfg = field(default_factory=FitnessWeightsCfg)
     out_dir: Path = Path("./runs")
+    logging: EvolveLoggingCfg = field(default_factory=EvolveLoggingCfg)
 
     def validate(self) -> None:
         self.search.validate()
@@ -79,12 +84,14 @@ def _build_evolve_cfg(d: Dict[str, Any]) -> EvolveCfg:
     search = _dict_to_dataclass(SearchCfg, d.get("search", {}))
     budget = _dict_to_dataclass(BudgetCfg, d.get("budget", {}))
     fitness = _dict_to_dataclass(FitnessWeightsCfg, d.get("fitness", {}))
+    logging = _dict_to_dataclass(EvolveLoggingCfg, d.get("logging", {}))
 
-    top = {k: v for k, v in d.items() if k not in ("search", "budget", "fitness")}
+    top = {k: v for k, v in d.items() if k not in ("search", "budget", "fitness", "logging")}
     cfg = EvolveCfg(
         search=search,
         budget=budget,
         fitness=fitness,
+        logging=logging,
         **top
     )
     cfg.validate()

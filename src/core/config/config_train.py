@@ -80,6 +80,18 @@ class SchedCfg:
             raise ValueError("Total epochs must be > 0 for scheduler validation.")
 
 @dataclass
+class TrainLoggingCfg:
+    # Parquet-first outputs in the run root
+    out_dir: str = "Runs" # base Runs/ root; final run folder decided at runtime
+    controller_ticks: bool = True # write controller_calls.parquet
+    train_val_scalars: bool = True # write logs_train.parquet & logs_val.parquet
+    features_json: bool = True # include a JSON feature snapshot in ticks (compact & flexible)
+
+    dir_tb: Optional[str] = None # "./runs" for TensorBoard if used
+    csv_path: Optional[str] = None # back compatibility with CSV summary path
+    log_interval: int = 100
+
+@dataclass
 class TrainCfg:
     # Top-level training options likely to match baseline.yaml
     epochs: int = 200
@@ -87,6 +99,7 @@ class TrainCfg:
     device: Optional[str] = None     # "cuda", "mps", "cpu", or None to auto-detect
     seed: int = 42
     log_dir: Path = Path("./runs")
+    log: TrainLoggingCfg = field(default_factory=TrainLoggingCfg)
 
     data: DataCfg = field(default_factory=DataCfg)
     model: ModelCfg = field(default_factory=ModelCfg)
@@ -120,12 +133,23 @@ def _build_train_cfg(d: Dict[str, Any]) -> TrainCfg:
     optim = _dict_to_dataclass(OptimCfg, d.get("optim", {}))
     sched = _dict_to_dataclass(SchedCfg, d.get("sched", {}))
 
-    top = {k: v for k, v in d.items() if k not in ("data", "model", "optim", "sched")}
+    top = {k: v for k, v in d.items() if k not in ("data", "model", "optim", "sched", "log")}
+    log_src = d.get("log", {}) or {}
+    train_log = TrainLoggingCfg(
+        out_dir="Runs",  # can be overridden by runner at runtime
+        controller_ticks=True,
+        train_val_scalars=True,
+        features_json=True,
+        dir_tb=log_src.get("dir_tb"),
+        csv_path=log_src.get("csv_path"),
+        log_interval=int(log_src.get("log_interval", 100)),
+    )
     cfg = TrainCfg(
         data=data,
         model=model,
         optim=optim,
         sched=sched,
+        log=train_log,
         **top
     )
     cfg.validate()

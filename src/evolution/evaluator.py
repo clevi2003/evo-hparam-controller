@@ -249,7 +249,7 @@ class TruncatedTrainingEvaluator:
         train_logger = None
         val_logger = None
         if self.out_dir and self.cfg.write_controller_ticks:
-            ticks_logger = self._make_tick_logger(self.out_dir / "controller_tick.parquet")
+            ticks_logger = self._make_tick_logger(self.out_dir / "controller_calls.parquet")
         if self.out_dir and self.cfg.write_train_val_logs:
             train_logger = make_train_parquet_logger(self.out_dir / "logs_train.parquet")
             val_logger = make_val_parquet_logger(self.out_dir / "logs_val.parquet")

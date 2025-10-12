@@ -44,6 +44,7 @@ class ControllerCfg:
         "train_loss", "val_loss", "train_acc", "val_acc",
         "lr_current", "ema_loss", "ema_acc", "d_loss", "d_acc"
     ])
+    logging_features_json: bool = True
 
     action: ControllerActionCfg = field(default_factory=ControllerActionCfg)
     controller_arch: ControllerArchCfg = field(default_factory=ControllerArchCfg)
@@ -61,14 +62,18 @@ class ControllerCfg:
         return asdict(self)
 
 def _build_controller_cfg(d: Dict[str, Any]) -> ControllerCfg:
-    action = _dict_to_dataclass(ControllerActionCfg, d.get("action", {}))
-    arch = _dict_to_dataclass(ControllerArchCfg, d.get("controller_arch", {}))
+    # action = _dict_to_dataclass(ControllerActionCfg, d.get("action", {}))
+    # arch = _dict_to_dataclass(ControllerArchCfg, d.get("controller_arch", {}))
 
-    top = {k: v for k, v in d.items() if k not in ("action", "controller_arch")}
+    # top = {k: v for k, v in d.items() if k not in ("action", "controller_arch")}
     cfg = ControllerCfg(
-        action=action,
-        controller_arch=arch,
-        **top
+        update_interval=int(d.get("update_interval", 50)),
+        cooldown=int(d.get("cooldown", 25)),
+        feature_ema_alpha=float(d.get("feature_ema_alpha", 0.1)),
+        features=list(d.get("features", [])) or ControllerCfg().features,
+        action=_dict_to_dataclass(ControllerActionCfg, d.get("action", {})),
+        controller_arch=_dict_to_dataclass(ControllerArchCfg, d.get("controller_arch", {})),
+        logging_features_json = bool(d.get("logging", {}).get("features_json", True)),
     )
     cfg.validate()
     return cfg

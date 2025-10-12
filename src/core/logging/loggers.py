@@ -76,6 +76,16 @@ DEFAULT_CONTROLLER_TICK_FIELDS: List[str] = [
     "val_acc_post", "val_loss_post",
     # stability flags
     "nan_flag", "overflow_flag",
+    "call_interval","warmup_len","action_ema_alpha",
+    "steps_since_last_call","cooldown_skips_cum",
+    # controller internals
+    "delta_log_lr_target","delta_log_lr_clamped","lr_multiplier",
+    "momentum_before","momentum_after","momentum_multiplier",
+    "wd_before","wd_after","wd_multiplier",
+    # derived signals & uncertainty placeholders
+    "gen_gap","ema_grad_norm","entropy","margin",
+    # safety & compact feature snapshot
+    "safety_event","safety_detail","features_json"
 ]
 
 # Arrow schema for strong typing & efficient compression
@@ -114,6 +124,31 @@ CONTROLLER_TICK_SCHEMA = pa.schema([
 
     pa.field("nan_flag", pa.bool_()),
     pa.field("overflow_flag", pa.bool_()),
+
+    pa.field("call_interval", pa.int32()),
+    pa.field("warmup_len", pa.int32()),
+    pa.field("action_ema_alpha", pa.float32()),
+    pa.field("steps_since_last_call", pa.int64()),
+    pa.field("cooldown_skips_cum", pa.int64()),
+
+    pa.field("delta_log_lr_target", pa.float32()),
+    pa.field("delta_log_lr_clamped", pa.float32()),
+    pa.field("lr_multiplier", pa.float32()),
+    pa.field("momentum_before", pa.float32()),
+    pa.field("momentum_after", pa.float32()),
+    pa.field("momentum_multiplier", pa.float32()),
+    pa.field("wd_before", pa.float32()),
+    pa.field("wd_after", pa.float32()),
+    pa.field("wd_multiplier", pa.float32()),
+
+    pa.field("gen_gap", pa.float32()),
+    pa.field("ema_grad_norm", pa.float32()),
+    pa.field("entropy", pa.float32()),
+    pa.field("margin", pa.float32()),
+
+    pa.field("safety_event", pa.string()),
+    pa.field("safety_detail", pa.string()),
+    pa.field("features_json", pa.string())
 ])
 
 
@@ -203,3 +238,39 @@ def make_train_csv_logger(path: Union[str, Path]) -> Logger:
 
 def make_val_csv_logger(path: Union[str, Path]) -> Logger:
     return Logger(CSVAppender(path, VAL_SCHEMA.names))
+
+EV_CANDIDATE_SCHEMA = pa.schema([
+    pa.field("run_id", pa.string()),
+    pa.field("generation", pa.int32()),
+    pa.field("candidate_idx", pa.int32()),
+    pa.field("seed", pa.int64()),
+    pa.field("controller_params", pa.int64()),
+    pa.field("arch", pa.string()),
+    pa.field("hidden", pa.int32()),
+    # fitness
+    pa.field("fitness", pa.float32()),
+    pa.field("primary_metric", pa.float32()),
+    pa.field("lr_vol_penalty", pa.float32()),
+    pa.field("nan_penalty", pa.float32()),
+    # budget & outcome
+    pa.field("budget_epochs", pa.int32()),
+    pa.field("budget_steps", pa.int32()),
+    pa.field("truncation_reason", pa.string()),
+    pa.field("promoted", pa.bool_()),
+])
+
+GEN_SUMMARY_SCHEMA = pa.schema([
+    pa.field("generation", pa.int32()),
+    pa.field("pop_size", pa.int32()),
+    pa.field("best_fitness", pa.float32()),
+    pa.field("mean_fitness", pa.float32()),
+    pa.field("std_fitness", pa.float32()),
+    pa.field("mutation_sigma", pa.float32()),  # or ES sigma
+    pa.field("promotions_json", pa.string()),
+])
+
+def make_evo_candidates_logger(path: Union[str, Path]) -> Logger:
+    return Logger(ParquetAppender(path, schema=EV_CANDIDATE_SCHEMA, buffer_rows=1024))
+
+def make_gen_summary_logger(path: Union[str, Path]) -> Logger:
+    return Logger(ParquetAppender(path, schema=GEN_SUMMARY_SCHEMA, buffer_rows=256))
