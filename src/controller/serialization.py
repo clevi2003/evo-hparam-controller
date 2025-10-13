@@ -27,9 +27,9 @@ def _iter_named_tensors(
     include_buffers: bool = False,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """
-    Deterministic iterator over tensors to serialize
-    Order: all named_parameters (registration order), then optionally named_buffers
-    This keeps registration order for stability. PyTorch preserves it
+    deterministic iterator over tensors to serialize
+    order: all named_parameters (registration order), then optionally named_buffers
+    this keeps registration order for stability. PyTorch preserves it
     """
     for name, p in model.named_parameters(recurse=True):
         if trainable_only and not p.requires_grad:

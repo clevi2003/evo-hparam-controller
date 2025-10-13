@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
 from src.utils import compute_grad_norm, detach_scalar, get_current_lr
 from src.training.run_context import RunContext
+from src.training.run_io import IOContext, bootstrap_io
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
 
@@ -27,11 +28,9 @@ class Trainer:
 
     Responsibilities:
       Run train & validation loops for a given number of epochs (or max_steps cap)
-      Maintain a shared `state` dict and call Hook events at well-defined points
+      Maintain a shared state dict and call Hook events at well defined points
       Provide optional AMP and gradient clipping
       Expose a fit() API that returns summary metrics
-
-    The engine is intentionally unopinionated about logging—use hooks for that
     """
 
     def __init__(
@@ -66,6 +65,7 @@ class Trainer:
         self.scaler = torch.cuda.amp.GradScaler(enabled=mixed_precision)
         self.hooks = hooks or NullHook()
         self.cfg = cfg
+
 
         # runtime counters
         self.global_step = 0
@@ -104,22 +104,29 @@ class Trainer:
         run_context.build_env(torch, bool(self.mixed_precision))
         run_context.build_config(self.model, self.optimizer, self.scheduler, self.train_loader, cfg, self.epochs)
         # =================================
+        io_ctx = None
 
         best_val_acc = float("-inf")
 
         self.hooks.on_train_start(state)
 
         try:
+            io_ctx = bootstrap_io(run_context, symlink_legacy_tick=True)
+            self.evaluator.set_log_writers(
+                train_writer=io_ctx.writers.train,
+                val_writer=io_ctx.writers.val,
+                controller_writer=io_ctx.writers.controller_calls,
+            )
             for epoch in range(self.epochs):
                 state["epoch"] = epoch
                 self.hooks.on_epoch_start(state)
 
-            # Training epoch
+            # training epoch
             self.model.train(True)
             for batch_idx, batch in enumerate(self.train_loader):
                 state["batch_idx"] = batch_idx
 
-                # Early-stop on max_steps budget
+                # early stop on max_steps budget
                 if self.max_steps is not None and self.global_step >= self.max_steps:
                     # run validation once at budget boundary if available
                     if self.val_loader is not None:
@@ -162,7 +169,6 @@ class Trainer:
 
                 # scheduler step
                 if self.scheduler is not None and hasattr(self.scheduler, "step"):
-                    # Many schedulers are designed to step per-iteration; this is the common case for cosine/warmup
                     self.scheduler.step()
 
                 # update counters
@@ -186,16 +192,16 @@ class Trainer:
                 state.pop("logits", None)
                 state.pop("targets", None)
 
-                # Validation at epoch end
+                # validation at epoch end
                 if self.val_loader is not None:
                     self._run_validation(state)
                     if state["val_acc"] is not None:
                         best_val_acc = max(best_val_acc, float(state["val_acc"]))
         finally:
-            # Write to file
+            # write to file
             run_context.finalize()
 
-        # Train end
+        # train end
         self.hooks.on_train_end(state)
 
         return {

@@ -22,17 +22,15 @@ from src.controller.runtime import ControllerRuntime, RuntimeConfig
 from src.controller.serialization import unflatten_params
 from src.controller.controller import ControllerMLP
 
-# logging
+# logging and fitness
 from src.core.logging.loggers import ControllerTickLogger, make_train_parquet_logger, make_val_parquet_logger
-
-# Fitness summary
 from src.evolution.fitness import RunSummary
-
 from src.models.resnet_cifar10 import resnet20
+from src.training.checkpoints import CheckpointIO
 
 
 class _BaseSchedulerStepHook(Hook):
-    """Step the base scheduler each batch before controller applies its action"""
+    """step the base scheduler each batch before controller applies its action"""
     def __init__(self, ctrl_scheduler: LrControllerScheduler) -> None:
         self.ctrl_scheduler = ctrl_scheduler
 
@@ -42,7 +40,7 @@ class _BaseSchedulerStepHook(Hook):
 
 
 class _CollectEvalPointsHook(Hook):
-    """Collect (global_step, val_acc) at the end of each evaluation"""
+    """collect (global_step, val_acc) at the end of each evaluation"""
     def __init__(self, collector: List[Tuple[int, float]]) -> None:
         self.collector = collector
 
@@ -54,7 +52,7 @@ class _CollectEvalPointsHook(Hook):
 
 
 class _CollectActionDeltasHook(Hook):
-    """Collect applied delta log lr each time the controller acts"""
+    """collect applied delta log lr each time the controller acts"""
     def __init__(self, collector: List[float]) -> None:
         self.collector = collector
 
@@ -67,7 +65,7 @@ class _CollectActionDeltasHook(Hook):
 
 class _DivergenceGuardHook(Hook):
     """
-    Detect nans or explosions. Sets state['diverged']=True when detected
+    detect nans or explosions. Sets state['diverged']=True when detected
     TODO: extend this to add gradient/weight explosion thresholds if needed
     """
     def __init__(self, loss_is_nan_penalty: float = 0.0) -> None:
@@ -160,6 +158,41 @@ class EvaluatorConfig:
     out_dir: Optional[str | Path] = None # if set, parquet logs will be written to this dir
     write_controller_ticks: bool = True
     write_train_val_logs: bool = True
+    checkpoint_io: Optional[CheckpointIO] = None
+
+@dataclass
+class EvalResult:
+    """
+    evaluation result for one candidate
+    fitness_primary: scalar fitness used by selection
+    primary_metric: name/label of that fitness
+    fitness_vector: multi-objective vector if applicable, else None or []
+    penalties: any penalties applied to fitness (for transparency)
+    metrics_snapshot: useful point metrics (val_acc@T, train_loss@last, etc)
+    budget_used: epochs, steps actually used and wall_time_s cost
+    truncation_reason: why the eval ended before full budget (or complete)
+    artifacts: checkpoints or extra files written during eval (relative paths under run_dir)
+    """
+    fitness_primary: float
+    primary_metric: str = "fitness"
+    fitness_vector: Optional[List[float]] = None
+    penalties: Dict[str, float] = None
+    metrics_snapshot: Dict[str, float] = None
+    budget_used: Dict[str, float] = None
+    truncation_reason: str = "complete"
+    artifacts: Optional[Dict[str, str]] = None
+
+    def __post_init__(self) -> None:
+        if self.penalties is None:
+            self.penalties = {}
+        if self.metrics_snapshot is None:
+            self.metrics_snapshot = {}
+        if self.budget_used is None:
+            self.budget_used = {"epochs": 0, "steps": 0, "wall_time_s": 0.0}
+        if self.fitness_vector is None:
+            self.fitness_vector = []
+        if self.artifacts is None:
+            self.artifacts = {}
 
 
 class TruncatedTrainingEvaluator:
@@ -192,6 +225,52 @@ class TruncatedTrainingEvaluator:
         self.out_dir = Path(self.cfg.out_dir) if self.cfg.out_dir else None
         if self.out_dir:
             self.out_dir.mkdir(parents=True, exist_ok=True)
+
+    def evaluate_result(self, candidate: Any) -> EvalResult:
+        """
+        normalize whatever evaluate returns into EvalResult
+        also attach a truncated-run 'final.pt' artifact if checkpoint_io is provided
+        """
+        raw = self.evaluate(candidate)
+
+        if isinstance(raw, EvalResult):
+            res = raw
+        elif isinstance(raw, dict):
+            res = EvalResult(
+                fitness_primary=float(raw.get("fitness", raw.get("fitness_primary", 0.0))),
+                primary_metric=str(raw.get("primary_metric", "fitness")),
+                fitness_vector=list(raw.get("fitness_vector", [])) if raw.get("fitness_vector") is not None else [],
+                penalties=dict(raw.get("penalties", {})),
+                metrics_snapshot=dict(raw.get("metrics_snapshot", {})),
+                budget_used=dict(raw.get("budget_used", {"epochs": 0, "steps": 0, "wall_time_s": 0.0})),
+                truncation_reason=str(raw.get("truncation_reason", "complete")),
+                artifacts=dict(raw.get("artifacts", {})) if raw.get("artifacts") else {},
+            )
+        else:
+            # scalar fallback
+            try:
+                fitness_val = float(raw)
+            except Exception:
+                fitness_val = 0.0
+            res = EvalResult(fitness_primary=fitness_val, primary_metric="fitness")
+
+        # save a truncated final.pt if requested
+        ckpt = self.cfg.checkpoint_io
+        if ckpt is not None:
+            extra = {"mode": "truncated"}
+            # try to include controller vector if accessible
+            vec = getattr(candidate, "vec", None)
+            # avoid saving large optimizer states for truncated evals
+            rel = ckpt.save_final(model_state=None, optimizer_state=None, scheduler_state=None, extra=extra)
+            try:
+                if vec is not None:
+                    ckpt.save_warmup({"controller_vec": vec})
+            except Exception:
+                pass
+            res.artifacts = dict(res.artifacts or {})
+            res.artifacts["final"] = rel
+
+        return res
 
     def evaluate(self, controller_vector: torch.Tensor) -> Dict[str, Any]:
         """

@@ -274,3 +274,11 @@ def make_evo_candidates_logger(path: Union[str, Path]) -> Logger:
 
 def make_gen_summary_logger(path: Union[str, Path]) -> Logger:
     return Logger(ParquetAppender(path, schema=GEN_SUMMARY_SCHEMA, buffer_rows=256))
+
+def make_controller_calls_logger(path: Union[str, Path],
+                               partitioned: bool = False,
+                               **kwargs) -> ControllerTickLogger:
+    if partitioned:
+        return ControllerTickLogger.to_parquet_dir(path, schema=CONTROLLER_TICK_SCHEMA, **kwargs)
+    else:
+        return ControllerTickLogger.to_parquet(path, schema=CONTROLLER_TICK_SCHEMA, **kwargs)

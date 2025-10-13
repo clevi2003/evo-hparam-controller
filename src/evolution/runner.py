@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
-from typing import List
+from typing import Optional
 import time
 import numpy as np
 import torch
 
 from src.core.config import load_train_cfg, load_controller_cfg, load_evolve_cfg
 from src.utils.seed_device import seed_everything
-from src.controller.serialization import flatten_params, unflatten_params, save_vector, to_numpy, from_numpy
-from src.core.logging.loggers import Logger
-from src.core.logging.logging_json_csv import CSVAppender
+from src.controller.serialization import flatten_params, to_numpy
 from src.evolution.evaluator import TruncatedTrainingEvaluator, EvaluatorConfig
-from src.evolution.fitness import FitnessWeights, score_run
+#from src.evolution.fitness import FitnessWeights, score_run
 from src.evolution.algorithms import Strategy, GA, GAConfig, ES, ESConfig, Genome
 from src.controller.controller import ControllerMLP
+from src.training.run_io import ensure_run_tree
+from src.training.run_context import RunContext
+from src.core.logging.loggers import make_evo_candidates_logger, make_gen_summary_logger
+from src.evolution.eval_helpers import compose_candidate_row, compose_gen_summary_row, describe_candidate
+from src.training.checkpoints import CheckpointIO
 
 
 def _build_strategy(evo_cfg) -> Strategy:
@@ -76,18 +80,63 @@ def run(args: argparse.Namespace) -> None:
     ctrl_cfg = load_controller_cfg(args.controller_config)
     evo_cfg = load_evolve_cfg(args.evolve_config)
 
-    # prep output dir
-    out_dir = Path(args.outdir)
-    _prepare_outdir(out_dir)
-    _save_configs(out_dir, train_cfg, ctrl_cfg, evo_cfg)
+    # seed everything for determinism
+    fixed_seed = getattr(evo_cfg.budget, "fixed_seed", None)
+    base_seed = getattr(evo_cfg, "random_seed", 12345)
+    seed_everything(fixed_seed if fixed_seed is not None else base_seed)
 
-    # ensure determinism
-    seed_everything(evo_cfg.budget.fixed_seed)
+    device = (
+        torch.device(train_cfg.device)
+        if getattr(train_cfg, "device", None)
+        else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
 
-    # move to fast device if available
-    device = torch.device(train_cfg.device) if train_cfg.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # setup run context (creates run_dir)
+    run_context = RunContext(cfg={
+        "train_config_path": str(args.train_config),
+        "controller_config_path": str(args.controller_config),
+        "evolve_config_path": str(args.evolve_config),
+        "args": vars(args),
+        "schema_version": "phase5-v1",
+    })
+    run_context.set_env({
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "torch": getattr(torch, "__version__", None),
+        "cuda_available": bool(torch.cuda.is_available()),
+        "device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+    })
+    run_context.set_config({
+        "train": train_cfg,
+        "controller": ctrl_cfg,
+        "evolve": evo_cfg,
+    })
 
-    # init controller vector and strategy
+    out_dir = Path(run_context.run_dir)
+    paths = ensure_run_tree(out_dir)
+
+    ckpt_io = CheckpointIO(root=out_dir / "checkpoints")
+
+    # init evaluator
+    artifacts_dir = None if args.no_artifacts else (out_dir / "artifacts")
+    eval_cfg = EvaluatorConfig(
+        out_dir=artifacts_dir,
+        write_train_val_logs=True,
+        write_controller_ticks=True,
+        checkpoint_io=ckpt_io
+    )
+    evaluator = TruncatedTrainingEvaluator(
+        train_cfg=train_cfg,
+        ctrl_cfg=ctrl_cfg,
+        budget_cfg=evo_cfg.budget,
+        device=device,
+        evaluator_cfg=eval_cfg
+    )
+
+    # evo log writers
+    evo_cand_logger = make_evo_candidates_logger(paths["evo_candidates"])
+    evo_gen_logger = make_gen_summary_logger(paths["evo_gen_summary"])
+
+    # strategy and parameter dimension
     v0_t = _init_controller_vector(ctrl_cfg, device=device)
     dim = int(v0_t.numel())
     v0_np = to_numpy(v0_t)
@@ -95,97 +144,145 @@ def run(args: argparse.Namespace) -> None:
     strategy = _build_strategy(evo_cfg)
     strategy.initialize(dim=dim, init_vec=v0_np)
 
-    # init evaluator
-    evaluator = TruncatedTrainingEvaluator(
-        train_cfg=train_cfg,
-        ctrl_cfg=ctrl_cfg,
-        budget_cfg=evo_cfg.budget,
-        evaluator_cfg=EvaluatorConfig(out_dir=None if args.no_artifacts else out_dir / "artifacts"),
-    )
+    # overall evolution loop
+    generations = args.generations or getattr(evo_cfg, "generations", 1)
+    cand_count = getattr(evo_cfg.search, "pop_size", 32)
 
-    # init fitness weights
-    fw = FitnessWeights(
-        primary=evo_cfg.fitness.primary,
-        lr_volatility_weight=evo_cfg.fitness.lr_volatility_weight,
-        nan_penalty=evo_cfg.fitness.nan_penalty,
-    )
-
-    # per generation logger (CSV for quick glance, artifacts contain Parquet if enabled)
-    gen_log = Logger(CSVAppender(out_dir / "gen_logs" / "summary.csv",
-                                 fieldnames=["generation", "candidate_idx", "fitness", "is_best", "elapsed_sec"]))
-
-    best_score = -1e18
-    best_vec_np: np.ndarray | None = None
+    best_fitness = -np.inf
+    best_genome: Optional[Genome] = None
     t_start = time.time()
 
-    generations = int(getattr(evo_cfg.search, "generations", getattr(args, "generations", 10)))
+    try:
+        for gen in range(generations):
+            # Ask strategy for candidates
+            genomes = strategy.ask(cand_count)
 
-    for gen in range(generations):
-        cand_count = evo_cfg.search.pop_size if hasattr(evo_cfg.search, "pop_size") else 32
-        candidates = strategy.ask(cand_count)
+            # Evaluate candidates
+            results = []
+            fitnesses = []
 
-        evaluated: List[Genome] = []
-        for idx, cand in enumerate(candidates):
-            # convert vector to torch for evaluator
-            vec_t = from_numpy(cand.vec, device=device, dtype=torch.float32)
+            for idx, genome in enumerate(genomes):
+                # each genome should have a parameter vector and a seed
+                vec = getattr(genome, "vec", None)
+                seed = int(getattr(genome, "seed", base_seed + gen * 1000 + idx))
 
-            result = evaluator.evaluate(vec_t)
-            summary = result["summary"]
-            fitness = float(score_run(summary, fw))
-            cand.score = fitness
-            evaluated.append(cand)
+                # evaluate each candidate
+                res = evaluator.evaluate_result(genome)
+                results.append(res)
+                fitnesses.append(float(res.fitness_primary))
+                genome.fitness = float(res.fitness_primary) # communicate to strategy
 
-            is_best = False
-            if fitness > best_score:
-                best_score = fitness
-                best_vec_np = cand.vec.copy()
-                is_best = True
+                # per-candidate logging
+                arch_str, hidden = describe_candidate(genome)
+                try:
+                    row = compose_candidate_row(
+                        run_id=run_context.run_id,
+                        generation=gen,
+                        candidate_idx=idx,
+                        candidate_seed=seed,
+                        controller_params=vec if vec is not None else [],
+                        eval_result=res,
+                        budget_cfg=getattr(evo_cfg, "budget", {}),
+                        arch_string=arch_str,
+                        arch_hidden=hidden,
+                        float_round_digits=getattr(evo_cfg, "float_round_digits", 7),
+                    )
+                    evo_cand_logger.log(row)
+                except Exception:
+                    # never crash evo bc of logging issues
+                    pass
 
-                # save best vector and a controller state_dict for replay
-                best_dir = out_dir / "checkpoints"
-                best_dir.mkdir(parents=True, exist_ok=True)
+            # track best of generation
+            if len(fitnesses) > 0:
+                gen_best_idx = int(np.nanargmax(np.asarray(fitnesses)))
+                gen_best_fit = float(fitnesses[gen_best_idx])
+                if gen_best_fit > best_fitness:
+                    best_fitness = gen_best_fit
+                    best_genome = genomes[gen_best_idx]
+                    try:
+                        if hasattr(best_genome, "vec") and best_genome.vec is not None:
+                            ckpt_io.save_best_vector(best_genome.vec)
+                    except Exception:
+                        pass
 
-                # save vector
-                save_vector(best_dir / "best_controller_vec.pt", vec_t.detach().cpu(), meta={
-                    "fitness": best_score,
-                    "generation": gen,
-                })
+            # tell strategy about outcomes
+            strategy.tell(genomes)
 
-                # also save a controller .pt
-                # build a fresh controller and load the vector
-                controller = ControllerMLP(
-                    in_dim=len(ctrl_cfg.features),
-                    hidden=ctrl_cfg.controller_arch.hidden,
-                    max_step=ctrl_cfg.action.max_step,
-                ).to(device)
-                unflatten_params(controller, vec_t, strict=True)
-                torch.save({"state_dict": controller.state_dict(),
-                            "meta": {"fitness": best_score, "generation": gen}},
-                           best_dir / "best_controller.pt")
+            # persist strategy snapshot for reproducibility
+            try:
+                snap_path = out_dir / "checkpoints" / f"strategy_gen{gen:04d}.pt"
+                torch.save(strategy.state_dict(), snap_path)
+            except Exception:
+                pass
 
-            gen_log.log({
-                "generation": gen,
-                "candidate_idx": idx,
-                "fitness": fitness,
-                "is_best": int(is_best),
-                "elapsed_sec": time.time() - t_start,
-            })
+            # per-generation summary logging
+            # try to extract sigma / mutation rate if available from strategy
+            sigma = None
+            ga_mut_rate = None
+            try:
+                # ES
+                if hasattr(strategy, "sigma"):
+                    sigma = getattr(strategy, "sigma")
+                elif hasattr(strategy, "state") and hasattr(strategy.state, "sigma"):
+                    sigma = getattr(strategy.state, "sigma")
+            except Exception:
+                sigma = None
+            try:
+                # GA
+                if hasattr(strategy, "mutation_rate"):
+                    ga_mut_rate = getattr(strategy, "mutation_rate")
+                elif hasattr(strategy, "state") and hasattr(strategy.state, "mutation_rate"):
+                    ga_mut_rate = getattr(strategy.state, "mutation_rate")
+            except Exception:
+                ga_mut_rate = None
 
-        # update strategy with evaluated genomes
-        strategy.tell(evaluated)
+            best_seed = -1
+            if best_genome is not None:
+                try:
+                    best_seed = int(getattr(best_genome, "seed", -1))
+                except Exception:
+                    best_seed = -1
 
-        # per generation info
-        snap_path = out_dir / "checkpoints" / f"strategy_gen{gen:04d}.pt"
-        torch.save(strategy.state_dict(), snap_path)
+            try:
+                gen_row = compose_gen_summary_row(
+                    generation=gen,
+                    population_size=len(genomes),
+                    results=results,
+                    best_idx=int(np.nanargmax(np.asarray(fitnesses))) if len(fitnesses) else 0,
+                    best_seed=best_seed,
+                    sigma=sigma,
+                    ga_mutation_rate=ga_mut_rate,
+                    promotions=getattr(evo_cfg, "promotions", []),
+                )
+                evo_gen_logger.log(gen_row)
+            except Exception:
+                pass
 
-    gen_log.close()
+        # final print summary
+        elapsed = time.time() - t_start
+        if best_genome is not None:
+            print(f"[evolve] Best fitness: {best_fitness:.6f} in {elapsed:.1f}s")
+            try:
+                best_path = out_dir / "checkpoints" / "best_controller_vec.pt"
+                # if Genome has vec, persist it for convenience
+                if hasattr(best_genome, "vec") and best_genome.vec is not None:
+                    torch.save({"vec": np.asarray(best_genome.vec, dtype=np.float32)}, best_path)
+                    print(f"[evolve] Saved best vector to: {best_path}")
+            except Exception:
+                pass
+        else:
+            print("[evolve] No valid candidates evaluated.")
 
-    # final best summary
-    if best_vec_np is not None:
-        print(f"[evolve] Best fitness: {best_score:.6f}")
-        print(f"[evolve] Saved to: {out_dir / 'checkpoints'}")
-    else:
-        print("[evolve] No valid candidates evaluated.")
+    finally:
+        try:
+            evo_cand_logger.close()
+        except Exception:
+            pass
+        try:
+            evo_gen_logger.close()
+        except Exception:
+            pass
+        run_context.finalize()
 
 def main():
     parser = argparse.ArgumentParser(description="Evolutionary search runner for LR controller.")

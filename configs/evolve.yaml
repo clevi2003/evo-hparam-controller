@@ -1,5 +1,5 @@
 search:
-  algo: "ga"         # or "es" or "cmaes"
+  algo: "ga" # or "es" or "cmaes"
   pop_size: 32
   parents: 8
   mutate_sigma: 0.05

@@ -8,6 +8,7 @@ data_/
 checkpoints/
 runs/
 outputs/
+project_files/
 
 # IDE
 .vscode/

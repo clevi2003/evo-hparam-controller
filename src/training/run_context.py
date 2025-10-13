@@ -35,6 +35,7 @@ class RunContext:
     def __init__(self, cfg: Optional[Dict[str, Any]] = None) -> None:
         self.cfg = cfg or {}
         run_id = os.environ.get("RUN_ID") or uuid.uuid4().hex[:8]
+        self.run_id = run_id
         # store start as a timezone-aware datetime (UTC) for accurate duration calculation
         self._start_dt = datetime.now(timezone.utc)
         start_ts = self.get_time(self._start_dt)
