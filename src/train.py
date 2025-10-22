@@ -15,7 +15,7 @@ from src.training.logging_hooks import (
 )
 from src.core.hooks.hook_composition import HookList
 from src.training.engine import Trainer
-from src.data.cifar10 import get_dataloaders
+from src.data_.cifar10 import get_dataloaders
 from src.models.resnet_cifar10 import resnet20
 
 def parse_args():
@@ -31,7 +31,7 @@ def main():
     cfg = load_train_cfg(args.config) # or load_train_cfg(args.config, overrides=parsed_overrides)
 
     # run context & IO
-    run_ctx = RunContext(cfg) # sets run_dir, start_time, git etc.
+    run_ctx = RunContext([args.config], cfg) # sets run_dir, start_time, git etc.
     io_ctx = bootstrap_io(run_ctx) # writers & paths
     run_ctx.write_config()
     run_ctx.write_meta()

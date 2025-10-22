@@ -94,7 +94,7 @@ def run(args: argparse.Namespace) -> None:
     )
 
     # setup run context (creates run_dir)
-    run_context = RunContext(cfg={
+    run_context = RunContext([args.train_config, args.controller_config, args.evolve_config], cfg={
         "train_config_path": str(args.train_config),
         "controller_config_path": str(args.controller_config),
         "evolve_config_path": str(args.evolve_config),

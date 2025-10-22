@@ -1,4 +1,5 @@
 from __future__ import annotations
+import shutil
 from typing import Any, Dict, Optional
 import os
 import json
@@ -32,13 +33,14 @@ class RunContext:
       - Provide finalize(end_status) to write end_time and status
     """
 
-    def __init__(self, cfg: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, cfg_paths, cfg: Optional[Dict[str, Any]] = None) -> None:
         self.cfg = cfg or {}
         run_id = os.environ.get("RUN_ID") or uuid.uuid4().hex[:8]
         self.run_id = run_id
         # store start as a timezone-aware datetime (UTC) for accurate duration calculation
         self._start_dt = datetime.now(timezone.utc)
         start_ts = self.get_time(self._start_dt)
+        self.cfg_paths = cfg_paths
 
         if isinstance(self.cfg, dict) and self.cfg.get("run_dir"):
             run_root = Path(self.cfg.get("run_dir"))
@@ -155,14 +157,15 @@ class RunContext:
             pass
 
     def write_config(self) -> None:
-        try:
-            p = self.run_dir / "config.jsonl"
-            lg = Logger(JSONLAppender(p, keep_fields=None))
-            lg.log(self.config)
-            lg.flush()
-            lg.close()
-        except Exception:
-            pass
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        # copy the exact YAML the run launched with
+        for i in range(len(self.cfg_paths)):
+            src = Path(self.cfg_paths[i])
+            if src.exists():
+                new_name = "config_" + str(i) + ".yaml"
+                shutil.copy2(src, self.run_dir / new_name)
+
 
     def write_env(self) -> None:
         try:
