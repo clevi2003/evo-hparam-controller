@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 from src.core.logging.loggers import (
     make_evo_candidates_logger,
     make_gen_summary_logger,
+    make_val_logger,
+    make_train_logger
 )
 
 
@@ -47,14 +49,16 @@ class RunWriters:
     gen_summary: Any
 
 
-def open_evolution_writers(paths: Dict[str, Path]) -> RunWriters:
+def open_writers(paths: Dict[str, Path]) -> RunWriters:
     """
     Initialize parquet writers for all artifacts
     """
     candidates = make_evo_candidates_logger(paths["evo_candidates"])
     gen_summary = make_gen_summary_logger(paths["evo_gen_summary"])
+    trains = make_train_logger(paths["train_log"])
+    vals = make_val_logger(paths["val_log"])
     # return handles so the caller can close explicitly
-    return RunWriters(train=None, val=None, controller_calls=None,
+    return RunWriters(train=trains, val=vals, controller_calls=None,
                       candidates=candidates, gen_summary=gen_summary)
 
 
@@ -77,7 +81,7 @@ class IOContext:
 
 def bootstrap_io(run_context, symlink_legacy_tick: bool = True) -> IOContext:
     """
-    Create Phase-4 folder layout and all parquet writers under RunContext.run_dir.
+    Create folder layout and all parquet writers under RunContext.run_dir.
     """
     run_dir: Path = Path(run_context.run_dir)
     paths = ensure_run_tree(run_dir)

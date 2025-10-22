@@ -6,3 +6,4 @@ rich>=13.7
 tensorboard>=2.14
 tqdm>=4.66
 pyarrow
+tqdm

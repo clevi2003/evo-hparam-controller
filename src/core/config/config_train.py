@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dataclasses import asdict, dataclass, field
-from .config_utils import _as_path, _ensure_between, _ensure_positive, _dict_to_dataclass, _read_yaml
+from .config_utils import _as_path, _ensure_between, _ensure_positive, _dict_to_dataclass, _read_yaml, _normalize_yaml_dict
 
 @dataclass
 class DataCfg:
@@ -12,7 +12,7 @@ class DataCfg:
     data_root: Path = Path("./data")
     batch_size: int = 128
     num_workers: int = 4
-    subset_fraction: float = 1.0  # used by evaluator when you want a smaller budget
+    subset_fraction: float = 1.0  # used by evaluator to have a smaller budget
 
     def validate(self) -> None:
         _ensure_positive("data.batch_size", self.batch_size)
@@ -82,7 +82,7 @@ class SchedCfg:
 @dataclass
 class TrainLoggingCfg:
     # Parquet-first outputs in the run root
-    out_dir: str = "Runs" # base Runs/ root; final run folder decided at runtime
+    out_dir: str = "runs" # base runs/ root; final run folder decided at runtime
     controller_ticks: bool = True # write controller_calls.parquet
     train_val_scalars: bool = True # write logs_train.parquet & logs_val.parquet
     features_json: bool = True # include a JSON feature snapshot in ticks (compact & flexible)
@@ -91,20 +91,40 @@ class TrainLoggingCfg:
     csv_path: Optional[str] = None # back compatibility with CSV summary path
     log_interval: int = 100
 
+    def validate(self) -> None:
+        _ensure_positive("log.log_interval", self.log_interval)
+
+@dataclass
+class CkptCfg:
+    # this can be optional: if omitted, runtime can use run_dir/checkpoints
+    dir: Optional[Path] = None
+    save_best: bool = True
+
+    def validate(self) -> None:
+        if self.dir is not None:
+            self.dir = _as_path(self.dir)
+
 @dataclass
 class TrainCfg:
-    # Top-level training options likely to match baseline.yaml
+    # Top-level training options to match baseline.yaml
     epochs: int = 200
-    max_steps: Optional[int] = None  # if set, can cap total steps regardless of epochs
-    device: Optional[str] = None     # "cuda", "mps", "cpu", or None to auto-detect
+    max_steps: Optional[int] = None # if set, can cap total steps regardless of epochs
+    device: Optional[str] = None # "cuda", "mps", "cpu", or None to auto-detect
     seed: int = 42
     log_dir: Path = Path("./runs")
-    log: TrainLoggingCfg = field(default_factory=TrainLoggingCfg)
 
+    mode: str = "baseline" # enforce "baseline" for now, TODO add controller support
+    exp_name: str = "resnet20_cifar10"
+    label_smoothing: float = 0.0
+    grad_clip_norm: Optional[float] = None
+    deterministic: bool = True
+
+    log: TrainLoggingCfg = field(default_factory=TrainLoggingCfg)
     data: DataCfg = field(default_factory=DataCfg)
     model: ModelCfg = field(default_factory=ModelCfg)
     optim: OptimCfg = field(default_factory=OptimCfg)
     sched: SchedCfg = field(default_factory=SchedCfg)
+    ckpt: CkptCfg = field(default_factory=CkptCfg)
 
     # Anything extra to carry through without breaking:
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -120,37 +140,70 @@ class TrainCfg:
         self.model.validate()
         self.optim.validate()
         self.sched.validate(total_epochs=self.epochs)
+        self.ckpt.validate()
+        self.log.validate()
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["log_dir"] = str(self.log_dir)
         d["data"]["data_root"] = str(self.data.data_root)
+        if self.ckpt.dir is not None:
+            d["ckpt"]["dir"] = str(self.ckpt.dir)
         return d
 
 def _build_train_cfg(d: Dict[str, Any]) -> TrainCfg:
-    data = _dict_to_dataclass(DataCfg, d.get("data", {}))
-    model = _dict_to_dataclass(ModelCfg, d.get("model", {}))
-    optim = _dict_to_dataclass(OptimCfg, d.get("optim", {}))
-    sched = _dict_to_dataclass(SchedCfg, d.get("sched", {}))
+    # normalize old/new shapes and aliases
+    nd = _normalize_yaml_dict(d)
 
-    top = {k: v for k, v in d.items() if k not in ("data", "model", "optim", "sched", "log")}
-    log_src = d.get("log", {}) or {}
+    data = _dict_to_dataclass(DataCfg, nd.get("data", {}))
+    model = _dict_to_dataclass(ModelCfg, nd.get("model", {}))
+    optim = _dict_to_dataclass(OptimCfg, nd.get("optim", {}))
+    sched = _dict_to_dataclass(SchedCfg, nd.get("sched", {}))
+    ckpt  = _dict_to_dataclass(CkptCfg,  nd.get("ckpt", {}))
+
+    # anything else goes to extra
+    known_keys = {
+        "epochs", "max_steps", "device", "seed", "log_dir",
+        "mode", "exp_name", "label_smoothing", "grad_clip_norm", "deterministic",
+        "data", "model", "optim", "sched", "ckpt", "log",
+        "train", "scheduler", "checkpoint", "checkpoints", # normalized already
+        "controller_run" # keep for forward-compatability
+    }
+
+    # logging config
+    log_src = nd.get("log", {}) or {}
     train_log = TrainLoggingCfg(
-        out_dir="Runs",  # can be overridden by runner at runtime
-        controller_ticks=True,
-        train_val_scalars=True,
-        features_json=True,
+        out_dir=str(log_src.get("out_dir", "runs")),
+        train_val_scalars=bool(log_src.get("train_val_scalars", True)),
+        controller_ticks=bool(log_src.get("controller_ticks", True)),
+        features_json=bool(log_src.get("features_json", True)),
         dir_tb=log_src.get("dir_tb"),
         csv_path=log_src.get("csv_path"),
         log_interval=int(log_src.get("log_interval", 100)),
     )
+
+    top: Dict[str, Any] = {k: v for k, v in nd.items() if k not in ("data", "model", "optim", "sched", "ckpt", "log")}
+    # extract extras  for pass through
+    extra: Dict[str, Any] = {k: v for k, v in top.items() if k not in known_keys}
+
     cfg = TrainCfg(
         data=data,
         model=model,
         optim=optim,
         sched=sched,
+        ckpt=ckpt,
         log=train_log,
-        **top
+        epochs=top.get("epochs", TrainCfg.epochs),
+        max_steps=top.get("max_steps", TrainCfg.max_steps),
+        device=top.get("device", TrainCfg.device),
+        seed=top.get("seed", TrainCfg.seed),
+        log_dir=_as_path(top.get("log_dir", TrainCfg.log_dir)) or TrainCfg.log_dir,
+        mode=top.get("mode", TrainCfg.mode),
+        exp_name=top.get("exp_name", TrainCfg.exp_name),
+        label_smoothing=top.get("label_smoothing", TrainCfg.label_smoothing),
+        grad_clip_norm=top.get("grad_clip_norm", TrainCfg.grad_clip_norm),
+        deterministic=top.get("deterministic", TrainCfg.deterministic),
+        extra=extra,
     )
     cfg.validate()
     return cfg

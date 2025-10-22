@@ -1,5 +1,5 @@
 enabled: true
-update_interval: 50 # steps between decisions
+update_interval: 50
 action:
   max_step: 0.2
   ema: 0.5

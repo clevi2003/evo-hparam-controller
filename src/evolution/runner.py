@@ -22,6 +22,8 @@ from src.core.logging.loggers import make_evo_candidates_logger, make_gen_summar
 from src.evolution.eval_helpers import compose_candidate_row, compose_gen_summary_row, describe_candidate
 from src.training.checkpoints import CheckpointIO
 
+from tqdm import tqdm
+
 
 def _build_strategy(evo_cfg) -> Strategy:
     algo = evo_cfg.search.algo.lower()
@@ -97,7 +99,7 @@ def run(args: argparse.Namespace) -> None:
         "controller_config_path": str(args.controller_config),
         "evolve_config_path": str(args.evolve_config),
         "args": vars(args),
-        "schema_version": "phase5-v1",
+        "schema_version": "v1",
     })
     run_context.set_env({
         "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
@@ -151,9 +153,19 @@ def run(args: argparse.Namespace) -> None:
     best_fitness = -np.inf
     best_genome: Optional[Genome] = None
     t_start = time.time()
+    # tqdm setup
+    disable_tqdm = getattr(args, "no_tqdm", False) or not sys.stdout.isatty()
 
     try:
-        for gen in range(generations):
+        gen_pbar = tqdm(
+            iterable=range(generations),
+            total=generations,
+            desc="Generations",
+            dynamic_ncols=True,
+            disable=disable_tqdm,
+            position=0
+        )
+        for gen in gen_pbar:
             # Ask strategy for candidates
             genomes = strategy.ask(cand_count)
 
@@ -161,7 +173,17 @@ def run(args: argparse.Namespace) -> None:
             results = []
             fitnesses = []
 
-            for idx, genome in enumerate(genomes):
+            cand_pbar = tqdm(
+                iterable=enumerate(genomes),
+                total=len(genomes),
+                desc=f"Gen {gen} candidates",
+                dynamic_ncols=True,
+                leave=False,
+                disable=disable_tqdm,
+                position=1
+            )
+
+            for idx, genome in cand_pbar:
                 # each genome should have a parameter vector and a seed
                 vec = getattr(genome, "vec", None)
                 seed = int(getattr(genome, "seed", base_seed + gen * 1000 + idx))
@@ -169,8 +191,12 @@ def run(args: argparse.Namespace) -> None:
                 # evaluate each candidate
                 res = evaluator.evaluate_result(genome)
                 results.append(res)
-                fitnesses.append(float(res.fitness_primary))
-                genome.fitness = float(res.fitness_primary) # communicate to strategy
+                fitness_value = float(res.fitness_primary)
+                fitnesses.append(fitness_value)
+                genome.fitness = fitness_value # communicate to strategy
+
+                # update inner bar postfix with last fitness
+                cand_pbar.set_postfix(last_fit=f"{fitness_value:.4f}")
 
                 # per-candidate logging
                 arch_str, hidden = describe_candidate(genome)
@@ -192,6 +218,8 @@ def run(args: argparse.Namespace) -> None:
                     # never crash evo bc of logging issues
                     pass
 
+            # close inner bar before proceeding
+            cand_pbar.close()
             # track best of generation
             if len(fitnesses) > 0:
                 gen_best_idx = int(np.nanargmax(np.asarray(fitnesses)))
@@ -202,6 +230,8 @@ def run(args: argparse.Namespace) -> None:
                     try:
                         if hasattr(best_genome, "vec") and best_genome.vec is not None:
                             ckpt_io.save_best_vector(best_genome.vec)
+                        # update outer bar immediately when a new global-best is found
+                        gen_pbar.set_postfix(best=f"{best_fitness:.4f}")
                     except Exception:
                         pass
 
@@ -258,20 +288,26 @@ def run(args: argparse.Namespace) -> None:
             except Exception:
                 pass
 
+            # refresh outer bar postfix each generation
+            gen_pbar.set_postfix(best=f"{best_fitness:.4f}" if np.isfinite(best_fitness) else "N/A",
+                                 sigma=f"{sigma:.4f}" if sigma is not None else "—",
+                                 mut=f"{ga_mut_rate:.4f}" if ga_mut_rate is not None else "—")
+        gen_pbar.close()
+
         # final print summary
         elapsed = time.time() - t_start
         if best_genome is not None:
-            print(f"[evolve] Best fitness: {best_fitness:.6f} in {elapsed:.1f}s")
+            tqdm.write(f"[evolve] Best fitness: {best_fitness:.6f} in {elapsed:.1f}s")
             try:
                 best_path = out_dir / "checkpoints" / "best_controller_vec.pt"
                 # if Genome has vec, persist it for convenience
                 if hasattr(best_genome, "vec") and best_genome.vec is not None:
                     torch.save({"vec": np.asarray(best_genome.vec, dtype=np.float32)}, best_path)
-                    print(f"[evolve] Saved best vector to: {best_path}")
+                    tqdm.write(f"[evolve] Saved best vector to: {best_path}")
             except Exception:
                 pass
         else:
-            print("[evolve] No valid candidates evaluated.")
+            tqdm.write("[evolve] No valid candidates evaluated.")
 
     finally:
         try:
@@ -286,12 +322,13 @@ def run(args: argparse.Namespace) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Evolutionary search runner for LR controller.")
-    parser.add_argument("--train-config", required=True, help="Path to training YAML (e.g., configs/baseline.yaml)")
-    parser.add_argument("--controller-config", required=True, help="Path to controller YAML (e.g., configs/controller.yaml)")
-    parser.add_argument("--evolve-config", required=True, help="Path to evolve YAML (e.g., configs/evolve.yaml)")
+    parser.add_argument("--train-config", required=True, help="Path to training YAML")
+    parser.add_argument("--controller-config", required=True, help="Path to controller YAML")
+    parser.add_argument("--evolve-config", required=True, help="Path to evolve YAML")
     parser.add_argument("--outdir", required=True, help="Output directory for run artifacts/checkpoints")
     parser.add_argument("--generations", type=int, default=10, help="Number of generations (fallback if not in YAML)")
     parser.add_argument("--no-artifacts", action="store_true", help="Disable per-candidate Parquet artifacts to speed up search")
+    parser.add_argument("--no-tqdm", action="store_true", help="Disable tqdm progress bars")
     args = parser.parse_args()
     run(args)
 

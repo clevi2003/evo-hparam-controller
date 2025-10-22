@@ -136,6 +136,14 @@ class RunContext:
         self.set_config(payload)
         return payload
 
+    def log_exception(self, e):
+        try:
+            path = self.run_dir / "exceptions.txt"
+            with open(path, "a") as f:
+                f.write(f"{datetime.now(timezone.utc).isoformat()}: {str(e)}\n")
+        except Exception:
+            pass
+
     def write_meta(self) -> None:
         try:
             p = self.run_dir / "run_meta.jsonl"

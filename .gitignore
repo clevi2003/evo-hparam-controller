@@ -4,11 +4,13 @@
 __pycache__/
 
 # Data and outputs
-data_/
+data/
 checkpoints/
 runs/
 outputs/
 project_files/
+data/cifar-10-python
+data/cifar-10-batches
 
 # IDE
 .vscode/

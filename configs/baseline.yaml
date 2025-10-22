@@ -1,3 +1,9 @@
+mode: "baseline" # ["baseline", "evolve", "controlled-train"]
+
+controller_run:
+  ckpt_path: "some_path/controller_best.pt" # REQUIRED if mode is "controlled-train"
+  enabled: true
+
 seed: 1337
 exp_name: "resnet20_cifar10"
 
@@ -30,7 +36,7 @@ scheduler:
 
 # Training
 train:
-  epochs: 200
+  epochs: 5 # set to a low number for testing; use 200 for full training
   label_smoothing: 0.0
   grad_clip_norm: null
   deterministic: true

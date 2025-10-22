@@ -282,3 +282,9 @@ def make_controller_calls_logger(path: Union[str, Path],
         return ControllerTickLogger.to_parquet_dir(path, schema=CONTROLLER_TICK_SCHEMA, **kwargs)
     else:
         return ControllerTickLogger.to_parquet(path, schema=CONTROLLER_TICK_SCHEMA, **kwargs)
+
+def make_train_logger(path: Union[str, Path]) -> Logger:
+    return Logger(ParquetAppender(path, schema=TRAIN_SCHEMA, buffer_rows=1024))
+
+def make_val_logger(path: Union[str, Path]) -> Logger:
+    return Logger(ParquetAppender(path, schema=VAL_SCHEMA, buffer_rows=1024))

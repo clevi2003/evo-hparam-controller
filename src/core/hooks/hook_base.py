@@ -39,6 +39,9 @@ class Hook:
     def on_epoch_start(self, state: State) -> None:
         pass
 
+    def on_epoch_end(self, state: State) -> None:
+        pass
+
     def on_batch_start(self, state: State) -> None:
         pass
 
