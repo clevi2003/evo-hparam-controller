@@ -1,5 +1,5 @@
 enabled: true
-update_interval: 50
+update_interval: 5
 action:
   max_step: 0.2
   ema: 0.5
@@ -21,3 +21,7 @@ features:
   - d_acc
   - grad_norm
   - update_ratio
+
+controller_arch:
+  hidden: 32
+  max_step: 0.2

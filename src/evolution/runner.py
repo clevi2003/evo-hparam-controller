@@ -189,7 +189,7 @@ def run(args: argparse.Namespace) -> None:
                 seed = int(getattr(genome, "seed", base_seed + gen * 1000 + idx))
 
                 # evaluate each candidate
-                res = evaluator.evaluate_result(genome)
+                res = evaluator.evaluate_result(genome.vec)
                 results.append(res)
                 fitness_value = float(res.fitness_primary)
                 fitnesses.append(fitness_value)
@@ -328,7 +328,7 @@ def main():
     parser.add_argument("--outdir", required=True, help="Output directory for run artifacts/checkpoints")
     parser.add_argument("--generations", type=int, default=10, help="Number of generations (fallback if not in YAML)")
     parser.add_argument("--no-artifacts", action="store_true", help="Disable per-candidate Parquet artifacts to speed up search")
-    parser.add_argument("--no-tqdm", action="store_true", help="Disable tqdm progress bars")
+    parser.add_argument("--no-tqdm", action="store_false", help="Disable tqdm progress bars")
     args = parser.parse_args()
     run(args)
 

@@ -57,10 +57,18 @@ class Hook:
     def on_train_end(self, state: State) -> None:
         pass
 
-    # Optional cleanup for resources (files, writers, etc.) might be needed
-    def close(self) -> None:
+    def on_after_backward(self, state: State) -> None:
         pass
 
+    def on_before_optimizer_step(self, state: State) -> None:
+        pass
+
+    def on_after_optimizer_step(self, state: State) -> None:
+        pass
+
+    # optional cleanup for resources (files, writers, etc.) might be needed
+    def close(self) -> None:
+        pass
 
 class NullHook(Hook):
     """A do-nothing hook (for placeholding)."""

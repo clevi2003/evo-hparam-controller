@@ -14,6 +14,7 @@ from src.training.logging_hooks import (
     make_train_metrics_hook, make_val_metrics_hook, # make_tb_hook_optional
 )
 from src.core.hooks.hook_composition import HookList
+from src.core.hooks.common_hooks import LambdaHook
 from src.training.engine import Trainer
 from src.data_.cifar10 import get_dataloaders
 from src.models.resnet_cifar10 import resnet20
@@ -70,6 +71,14 @@ def main():
     # hook that calls ckpt_io on eval end
     hooks.append(ckpt_io.make_checkpoint_hook())
 
+    hooks.append(
+        LambdaHook(
+            on_after_backward=lambda state: torch.nn.utils.clip_grad_norm_(
+                state.model.parameters(), max_norm=float(cfg.grad_clip_norm)
+            )
+        )
+    )
+
     # tb_hook = make_tb_hook_optional(cfg.log.dir_tb, run_ctx) # TODO if we want tensorboard
     # if tb_hook:
     #     hooks.append(tb_hook)
@@ -89,7 +98,7 @@ def main():
         epochs=cfg.epochs,
         max_steps=cfg.max_steps,
         mixed_precision=False,
-        grad_clip=cfg.grad_clip_norm,
+        #grad_clip=cfg.grad_clip_norm,
         metric_fn=None,
         cfg=cfg.to_dict(),
     )

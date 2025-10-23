@@ -115,6 +115,9 @@ class LambdaHook(Hook):
         on_eval_end: Optional[Callable[[State], None]] = None,
         on_train_end: Optional[Callable[[State], None]] = None,
         on_close: Optional[Callable[[], None]] = None,
+        on_after_backward: Optional[Callable[[], None]] = None,
+        on_before_optimizer_step: Optional[Callable[[], None]] = None,
+        on_after_optimizer_step: Optional[Callable[[], None]] = None,
     ) -> None:
         self._on_train_start = on_train_start
         self._on_epoch_start = on_epoch_start
@@ -124,6 +127,9 @@ class LambdaHook(Hook):
         self._on_eval_end = on_eval_end
         self._on_train_end = on_train_end
         self._on_close = on_close
+        self._on_after_backward = on_after_backward
+        self._on_before_optimizer_step = on_before_optimizer_step
+        self._on_after_optimizer_step = on_after_optimizer_step
 
     def on_train_start(self, state: State) -> None:
         if self._on_train_start:
@@ -152,6 +158,18 @@ class LambdaHook(Hook):
     def on_train_end(self, state: State) -> None:
         if self._on_train_end:
             self._on_train_end(state)
+
+    def on_after_backward(self, state: State) -> None:
+        if self._on_after_backward:
+            self._on_after_backward(state)
+
+    def on_before_optimizer_step(self, state: State) -> None:
+        if self._on_before_optimizer_step:
+            self._on_before_optimizer_step(state)
+
+    def on_after_optimizer_step(self, state: State) -> None:
+        if self._on_after_optimizer_step:
+            self._on_after_optimizer_step(state)
 
     def close(self) -> None:
         if self._on_close:

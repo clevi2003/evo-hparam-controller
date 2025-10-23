@@ -151,6 +151,7 @@ class Trainer:
             "scheduler": self.scheduler,
             "device": self.device,
             "cfg": self.cfg,
+            "model": self.model,
             # live scalars
             "loss": None,
             "acc": None,
@@ -210,22 +211,22 @@ class Trainer:
 
                         # backward
                         self.optimizer.zero_grad(set_to_none=True)
+
                         if self.mixed_precision:
                             self.scaler.scale(loss).backward()
-                            if self.grad_clip is not None:
-                                self.scaler.unscale_(self.optimizer)
-                                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                            self.scaler.unscale_(self.optimizer)
+                            self.hooks.on_after_backward(state)
+                            self.hooks.on_before_optimizer_step(state)
                             self.scaler.step(self.optimizer)
                             self.scaler.update()
+                            self.hooks.on_after_optimizer_step(state)
+
                         else:
                             loss.backward()
-                            if self.grad_clip is not None:
-                                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                            self.hooks.on_after_backward(state)
+                            self.hooks.on_before_optimizer_step(state)
                             self.optimizer.step()
-
-                        # scheduler step per batch if needed
-                        if self.scheduler is not None and self.scheduler_step_when == "batch":
-                            self.scheduler.step()
+                            self.hooks.on_after_optimizer_step(state)
 
                         # update counters and collect metrics
                         self.global_step += 1

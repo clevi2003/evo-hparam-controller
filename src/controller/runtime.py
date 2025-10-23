@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
-from features import _safe_float
+from src.controller.features import _safe_float
 from src.core.hooks.hook_base import Hook, State
 from src.controller.features import FeatureExtractor
 from src.controller.lr_scheduler import LrControllerScheduler
