@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import math
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 import numpy as np
 
@@ -22,34 +23,37 @@ def serialize_params(vec: Union[np.ndarray, list[float], tuple[float, ...]],
     return json.dumps(_round_list(data, round_digits), separators=(",", ":"))
 
 
-def describe_candidate(candidate: Any) -> Tuple[str, Dict[str, Any]]:
+def describe_candidate(genome) -> Tuple[str, int]:
     """
-    return a stable (arch_string, hidden_dict) description of the candidate
-    tries common attributes but falls back to type name if those fail
+    Return a display string and a 'hidden' size for quick filtering.
+    If you do not encode arch in the genome, fall back to simple labels.
     """
-    # try common patterns
-    if hasattr(candidate, "arch_string"):
-        arch = str(candidate.arch_string)
-    elif hasattr(candidate, "controller") and hasattr(candidate.controller, "arch_string"):
-        arch = str(candidate.controller.arch_string)
-    elif hasattr(candidate, "arch"):
-        arch = str(candidate.arch)
-    else:
-        arch = f"{type(candidate).__name__}"
+    hidden = getattr(getattr(genome, "arch", None), "hidden", None)
+    if hidden is None:
+        hidden = int(getattr(genome, "hidden", 0) or 0)
+    arch_str = getattr(getattr(genome, "arch", None), "name", None)
+    if arch_str is None:
+        arch_str = "ControllerMLP"
+    return str(arch_str), int(hidden)
 
-    hidden: Dict[str, Any] = {}
-    for key in ("hidden", "arch_kwargs", "extra", "cfg"):
-        if hasattr(candidate, key):
-            try:
-                val = getattr(candidate, key)
-                # Avoid dumping giant objects
-                if isinstance(val, dict):
-                    hidden = val
-                break
-            except Exception:
-                pass
-    return arch, hidden
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        v = float(x)
+        if math.isnan(v) or math.isinf(v):
+            return default
+        return v
+    except Exception:
+        return default
 
+def _norms(vec: Any) -> Tuple[int, float, float]:
+    try:
+        arr = np.asarray(vec, dtype=np.float32)
+        dim = int(arr.size)
+        l2 = float(np.linalg.norm(arr)) if dim > 0 else 0.0
+        max_abs = float(np.max(np.abs(arr))) if dim > 0 else 0.0
+        return dim, l2, max_abs
+    except Exception:
+        return 0, 0.0, 0.0
 
 def compose_candidate_row(
     *,
@@ -57,42 +61,100 @@ def compose_candidate_row(
     generation: int,
     candidate_idx: int,
     candidate_seed: int,
-    controller_params: Union[np.ndarray, list[float], tuple[float, ...]],
-    eval_result: EvalResult,
-    budget_cfg: Dict[str, Any],
+    controller_params: Any,
+    eval_result: Any,
+    budget_cfg: Any,
     arch_string: str,
-    arch_hidden: Dict[str, Any],
+    arch_hidden: int,
     float_round_digits: int = 7,
 ) -> Dict[str, Any]:
     """
-    build one row for evolution/candidates.parquet
+    Produce a row dict that matches EVO_CANDIDATES_SCHEMA.
+    Works with EvalResult returned from evaluator.evaluate_result.
     """
-    row: Dict[str, Any] = {
-        # descriptor
-        "run_id": run_id,
+    # unpack eval_result
+    fitness = _safe_float(getattr(eval_result, "fitness_primary", None), 0.0)
+    primary_metric = getattr(eval_result, "primary_metric", "fitness")
+    artifacts = getattr(eval_result, "artifacts", {}) or {}
+
+    # metrics_snapshot is optional in your evaluator's return path
+    metrics_snapshot = getattr(eval_result, "metrics_snapshot", None)
+    if metrics_snapshot is None and isinstance(eval_result, dict):
+        metrics_snapshot = eval_result.get("metrics_snapshot")
+
+    auc_val = 0.0
+    final_val_acc = 0.0
+    lr_delta_std = 0.0
+    if isinstance(metrics_snapshot, dict):
+        auc_val = _safe_float(metrics_snapshot.get("auc_val_acc"), 0.0)
+        final_val_acc = _safe_float(metrics_snapshot.get("final_val_acc"), 0.0)
+        lr_delta_std = _safe_float(metrics_snapshot.get("lr_delta_std"), 0.0)
+
+    # diverged and step/epoch counts
+    diverged = False
+    total_steps = 0
+    total_epochs = 0
+    # eval_result may have "summary" with these numbers
+    summary = getattr(eval_result, "summary", None)
+    if summary is None and isinstance(eval_result, dict):
+        summary = eval_result.get("summary")
+    if summary is not None:
+        try:
+            diverged = bool(getattr(summary, "diverged", False))
+            total_steps = int(getattr(summary, "total_steps", 0))
+            total_epochs = int(getattr(summary, "total_epochs", 0))
+        except Exception:
+            pass
+    else:
+        # try dict fields on eval_result
+        diverged = bool(getattr(eval_result, "diverged", False) or False)
+
+    # budget
+    budget_epochs = int(getattr(getattr(budget_cfg, "__dict__", {}), "epochs", getattr(budget_cfg, "epochs", 0)) or 0)
+    budget_max_steps = int(getattr(getattr(budget_cfg, "__dict__", {}), "max_steps", getattr(budget_cfg, "max_steps", 0)) or 0)
+
+    # params
+    param_dim, param_l2, param_max_abs = _norms(controller_params)
+
+    # version tag if present on eval_result.artifacts or genome
+    controller_version = ""
+    try:
+        controller_version = str(getattr(eval_result, "controller_version", "")) or ""
+    except Exception:
+        controller_version = ""
+
+    # trial_id not yet used, placeholder 0
+    trial_id = 0
+    # artifacts json
+    try:
+        artifacts_json = json.dumps(artifacts)
+    except Exception:
+        artifacts_json = "{}"
+
+    return {
+        "run_id": str(run_id),
         "generation": int(generation),
         "candidate_idx": int(candidate_idx),
-        "seed": int(candidate_seed),
-        "controller_params": serialize_params(controller_params, round_digits=float_round_digits),
-        "arch": arch_string,
-        "hidden": json.dumps(arch_hidden or {}, separators=(",", ":")),
-        # fitness
-        "fitness": float(eval_result.fitness_primary),
-        "primary_metric": str(eval_result.primary_metric),
-        "penalties_json": json.dumps(eval_result.penalties or {}, separators=(",", ":")),
-        "fitness_vector_json": json.dumps(eval_result.fitness_vector or [], separators=(",", ":")),
-        # budget
-        "budget_epochs": int(budget_cfg.get("epochs", 0)) if budget_cfg else None,
-        "budget_steps": int(budget_cfg.get("steps", 0)) if budget_cfg else None,
-        "used_epochs": int(eval_result.budget_used.get("epochs", 0)),
-        "used_steps": int(eval_result.budget_used.get("steps", 0)),
-        "wall_time_s": float(eval_result.budget_used.get("wall_time_s", 0.0)),
-        "truncation_reason": str(eval_result.truncation_reason or "complete"),
-        # lifecycle
-        "promoted": False,
-        "artifacts_json": json.dumps(eval_result.artifacts or {}, separators=(",", ":")),
+        "candidate_seed": int(candidate_seed),
+        "trial_id": int(trial_id),
+        "fitness": float(round(fitness, float_round_digits)),
+        "primary_metric": str(primary_metric),
+        "auc_val_acc": float(round(auc_val, float_round_digits)),
+        "final_val_acc": float(round(final_val_acc, float_round_digits)),
+        "lr_delta_std": float(round(lr_delta_std, float_round_digits)),
+        "diverged": bool(diverged),
+        "total_steps": int(total_steps),
+        "total_epochs": int(total_epochs),
+        "arch_string": str(arch_string),
+        "arch_hidden": int(arch_hidden),
+        "controller_version": str(controller_version),
+        "param_dim": int(param_dim),
+        "param_l2": float(round(param_l2, float_round_digits)),
+        "param_max_abs": float(round(param_max_abs, float_round_digits)),
+        "budget_epochs": int(budget_epochs),
+        "budget_max_steps": int(budget_max_steps),
+        "artifacts_json": artifacts_json,
     }
-    return row
 
 
 def compose_gen_summary_row(

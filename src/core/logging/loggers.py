@@ -59,6 +59,17 @@ class MultiLogger(Logger):
         if errs:
             raise RuntimeError(" | ".join(errs))
 
+COMMON_ID_FIELDS: List[pa.Field] = [
+    pa.field("train_run_id", pa.string()), # UUID or run_id; unique per training process
+    pa.field("candidate_id", pa.string()), # UUID per candidate/policy
+    pa.field("generation", pa.int32()), # EA generation index
+    pa.field("individual", pa.int32()), # index within generation (candidate_idx)
+    pa.field("trial_id", pa.int32()), # repeat eval index (0 if not used)
+    pa.field("controller_version", pa.string()), # short hash tag for policy weights
+    pa.field("mode", pa.string()), # "evolve" | "baseline" | "controlled-train"
+    pa.field("exp_name", pa.string()), # run/experiment label
+]
+
 
 DEFAULT_CONTROLLER_TICK_FIELDS: List[str] = [
     # identity
@@ -89,67 +100,68 @@ DEFAULT_CONTROLLER_TICK_FIELDS: List[str] = [
 ]
 
 # Arrow schema for strong typing & efficient compression
-CONTROLLER_TICK_SCHEMA = pa.schema([
-    pa.field("run_id", pa.string()),
-    pa.field("seed", pa.int64()),
-    pa.field("arch", pa.string()),
-    pa.field("dataset", pa.string()),
+CONTROLLER_TICK_SCHEMA = pa.schema(
+    COMMON_ID_FIELDS + [
+        pa.field("run_id", pa.string()),
+        pa.field("seed", pa.int64()),
+        pa.field("arch", pa.string()),
+        pa.field("dataset", pa.string()),
 
-    pa.field("epoch", pa.int64()),
-    pa.field("global_step", pa.int64()),
-    pa.field("step_in_epoch", pa.int64()),
-    pa.field("timestamp", pa.string()),
+        pa.field("epoch", pa.int64()),
+        pa.field("global_step", pa.int64()),
+        pa.field("step_in_epoch", pa.int64()),
+        pa.field("timestamp", pa.string()),
 
-    pa.field("train_loss", pa.float32()),
-    pa.field("val_loss", pa.float32()),
-    pa.field("train_acc", pa.float32()),
-    pa.field("val_acc", pa.float32()),
-    pa.field("ema_loss", pa.float32()),
-    pa.field("ema_acc", pa.float32()),
-    pa.field("d_loss", pa.float32()),
-    pa.field("d_acc", pa.float32()),
-    pa.field("lr_before", pa.float32()),
-    pa.field("grad_norm", pa.float32()),
-    pa.field("update_ratio", pa.float32()),
-    pa.field("clip_events", pa.int32()),
+        pa.field("train_loss", pa.float32()),
+        pa.field("val_loss", pa.float32()),
+        pa.field("train_acc", pa.float32()),
+        pa.field("val_acc", pa.float32()),
+        pa.field("ema_loss", pa.float32()),
+        pa.field("ema_acc", pa.float32()),
+        pa.field("d_loss", pa.float32()),
+        pa.field("d_acc", pa.float32()),
+        pa.field("lr_before", pa.float32()),
+        pa.field("grad_norm", pa.float32()),
+        pa.field("update_ratio", pa.float32()),
+        pa.field("clip_events", pa.int32()),
 
-    pa.field("delta_log_lr_raw", pa.float32()),
-    pa.field("delta_log_lr_applied", pa.float32()),
-    pa.field("lr_after", pa.float32()),
-    pa.field("applied", pa.bool_()),
-    pa.field("cooldown_left", pa.int32()),
+        pa.field("delta_log_lr_raw", pa.float32()),
+        pa.field("delta_log_lr_applied", pa.float32()),
+        pa.field("lr_after", pa.float32()),
+        pa.field("applied", pa.bool_()),
+        pa.field("cooldown_left", pa.int32()),
 
-    pa.field("val_acc_post", pa.float32()),
-    pa.field("val_loss_post", pa.float32()),
+        pa.field("val_acc_post", pa.float32()),
+        pa.field("val_loss_post", pa.float32()),
 
-    pa.field("nan_flag", pa.bool_()),
-    pa.field("overflow_flag", pa.bool_()),
+        pa.field("nan_flag", pa.bool_()),
+        pa.field("overflow_flag", pa.bool_()),
 
-    pa.field("call_interval", pa.int32()),
-    pa.field("warmup_len", pa.int32()),
-    pa.field("action_ema_alpha", pa.float32()),
-    pa.field("steps_since_last_call", pa.int64()),
-    pa.field("cooldown_skips_cum", pa.int64()),
+        pa.field("call_interval", pa.int32()),
+        pa.field("warmup_len", pa.int32()),
+        pa.field("action_ema_alpha", pa.float32()),
+        pa.field("steps_since_last_call", pa.int64()),
+        pa.field("cooldown_skips_cum", pa.int64()),
 
-    pa.field("delta_log_lr_target", pa.float32()),
-    pa.field("delta_log_lr_clamped", pa.float32()),
-    pa.field("lr_multiplier", pa.float32()),
-    pa.field("momentum_before", pa.float32()),
-    pa.field("momentum_after", pa.float32()),
-    pa.field("momentum_multiplier", pa.float32()),
-    pa.field("wd_before", pa.float32()),
-    pa.field("wd_after", pa.float32()),
-    pa.field("wd_multiplier", pa.float32()),
+        pa.field("delta_log_lr_target", pa.float32()),
+        pa.field("delta_log_lr_clamped", pa.float32()),
+        pa.field("lr_multiplier", pa.float32()),
+        pa.field("momentum_before", pa.float32()),
+        pa.field("momentum_after", pa.float32()),
+        pa.field("momentum_multiplier", pa.float32()),
+        pa.field("wd_before", pa.float32()),
+        pa.field("wd_after", pa.float32()),
+        pa.field("wd_multiplier", pa.float32()),
 
-    pa.field("gen_gap", pa.float32()),
-    pa.field("ema_grad_norm", pa.float32()),
-    pa.field("entropy", pa.float32()),
-    pa.field("margin", pa.float32()),
+        pa.field("gen_gap", pa.float32()),
+        pa.field("ema_grad_norm", pa.float32()),
+        pa.field("entropy", pa.float32()),
+        pa.field("margin", pa.float32()),
 
-    pa.field("safety_event", pa.string()),
-    pa.field("safety_detail", pa.string()),
-    pa.field("features_json", pa.string())
-])
+        pa.field("safety_event", pa.string()),
+        pa.field("safety_detail", pa.string()),
+        pa.field("features_json", pa.string()),
+    ])
 
 
 @dataclass
@@ -207,21 +219,23 @@ class ControllerTickLogger:
     def close(self) -> None:
         self.appender.close()
 
-TRAIN_SCHEMA = pa.schema([
-    pa.field("global_step", pa.int64()),
-    pa.field("epoch", pa.int64()),
-    pa.field("loss", pa.float32()),
-    pa.field("acc", pa.float32()),
-    pa.field("lr", pa.float32()),
-    pa.field("grad_norm", pa.float32()),
-])
+TRAIN_SCHEMA = pa.schema(
+    COMMON_ID_FIELDS + [
+        pa.field("global_step", pa.int64()),
+        pa.field("epoch", pa.int64()),
+        pa.field("loss", pa.float32()),
+        pa.field("acc", pa.float32()),
+        pa.field("lr", pa.float32()),
+        pa.field("grad_norm", pa.float32()),
+    ])
 
-VAL_SCHEMA = pa.schema([
-    pa.field("global_step", pa.int64()),
-    pa.field("epoch", pa.int64()),
-    pa.field("val_loss", pa.float32()),
-    pa.field("val_acc", pa.float32()),
-])
+VAL_SCHEMA = pa.schema(
+    COMMON_ID_FIELDS + [
+        pa.field("global_step", pa.int64()),
+        pa.field("epoch", pa.int64()),
+        pa.field("val_loss", pa.float32()),
+        pa.field("val_acc", pa.float32()),
+    ])
 
 
 def make_train_parquet_logger(path: Union[str, Path], buffer_rows: int = 4096) -> Logger:
@@ -259,18 +273,44 @@ EV_CANDIDATE_SCHEMA = pa.schema([
     pa.field("promoted", pa.bool_()),
 ])
 
-GEN_SUMMARY_SCHEMA = pa.schema([
-    pa.field("generation", pa.int32()),
-    pa.field("pop_size", pa.int32()),
-    pa.field("best_fitness", pa.float32()),
-    pa.field("mean_fitness", pa.float32()),
-    pa.field("std_fitness", pa.float32()),
-    pa.field("mutation_sigma", pa.float32()),  # or ES sigma
-    pa.field("promotions_json", pa.string()),
-])
+EVO_CANDIDATES_SCHEMA = pa.schema(
+    COMMON_ID_FIELDS + [
+        pa.field("run_id", pa.string()),
+        pa.field("candidate_seed", pa.int64()),
+        pa.field("fitness", pa.float32()),
+        pa.field("primary_metric", pa.string()),
+        pa.field("auc_val_acc", pa.float32()),
+        pa.field("final_val_acc", pa.float32()),
+        pa.field("lr_delta_std", pa.float32()),
+        pa.field("diverged", pa.bool_()),
+        pa.field("total_steps", pa.int32()),
+        pa.field("total_epochs", pa.int32()),
+        pa.field("arch_string", pa.string()),
+        pa.field("arch_hidden", pa.int32()),
+        pa.field("param_dim", pa.int32()),
+        pa.field("param_l2", pa.float32()),
+        pa.field("param_max_abs", pa.float32()),
+        pa.field("budget_epochs", pa.int32()),
+        pa.field("budget_max_steps", pa.int32()),
+        pa.field("artifacts_json", pa.string()),
+    ])
+
+EVO_GEN_SUMMARY_SCHEMA = pa.schema(
+    COMMON_ID_FIELDS + [
+        pa.field("run_id", pa.string()),
+        pa.field("population_size", pa.int32()),
+        pa.field("best_fitness", pa.float32()),
+        pa.field("mean_fitness", pa.float32()),
+        pa.field("std_fitness", pa.float32()),
+        pa.field("best_idx", pa.int32()),
+        pa.field("best_seed", pa.int64()),
+        pa.field("mutation_sigma", pa.float32()),
+        pa.field("ga_mutation_rate", pa.float32()),
+        pa.field("promotions_json", pa.string()),
+    ])
 
 def make_evo_candidates_logger(path: Union[str, Path]) -> Logger:
-    return Logger(ParquetAppender(path, schema=EV_CANDIDATE_SCHEMA, buffer_rows=1024))
+    return Logger(ParquetAppender(path, schema=EVO_CANDIDATES_SCHEMA, buffer_rows=1024))
 
 def make_gen_summary_logger(path: Union[str, Path]) -> Logger:
     return Logger(ParquetAppender(path, schema=GEN_SUMMARY_SCHEMA, buffer_rows=256))

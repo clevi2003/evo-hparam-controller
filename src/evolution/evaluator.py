@@ -29,12 +29,11 @@ from src.core.logging.loggers import (
     make_train_parquet_logger,
     make_val_parquet_logger,
 )
-from src.evolution.fitness import RunSummary
+from src.evolution.fitness import RunSummary, score_run, FitnessWeights, auc
 from src.training.checkpoints import CheckpointIO
 from src.data_.cifar10 import get_dataloaders
 from src.models.resnet_cifar10 import resnet20
 from src.training.optim_sched_factory import build_optimizer, build_baseline_scheduler
-
 
 
 class _BaseSchedulerStepHook(Hook):
@@ -137,6 +136,9 @@ class EvaluatorConfig:
     write_train_val_logs: bool = True
     checkpoint_io: Optional[CheckpointIO] = None
 
+    # allow injecting/overriding fitness weighting
+    fitness_weights: Optional[FitnessWeights] = None
+
 
 @dataclass
 class EvalResult:
@@ -186,13 +188,19 @@ class TruncatedTrainingEvaluator:
         # builders
         self._model_builder = self.cfg.model_builder or (lambda arch, nc: _default_build_cifar_model())
         self._data_builder = self.cfg.dataloaders_builder or (
-            lambda root, bs, nw, pct, seed: _default_build_cifar10_dataloaders(root, bs, nw, pct, seed)
-        )
+            lambda root, bs, nw, pct, seed: _default_build_cifar10_dataloaders(root, bs, nw, pct, seed))
 
         # optional output dir for Parquet logs
         self.out_dir = Path(self.cfg.out_dir) if self.cfg.out_dir else None
         if self.out_dir:
             self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        # fitness weights (defaults to AUC primary with small LR-volatility penalty and NaN penalty)
+        self.fitness_weights: FitnessWeights = self.cfg.fitness_weights or FitnessWeights(
+            primary="auc_val_acc",
+            lr_volatility_weight=0.1,
+            nan_penalty=100.0,
+        )
 
     def evaluate_result(self, candidate: Any) -> EvalResult:
         raw = self.evaluate(candidate)
@@ -201,7 +209,7 @@ class TruncatedTrainingEvaluator:
         elif isinstance(raw, dict):
             res = EvalResult(
                 fitness_primary=float(raw.get("fitness", raw.get("fitness_primary", 0.0))),
-                primary_metric=str(raw.get("primary_metric", "fitness")),
+                primary_metric=str(raw.get("primary_metric", self.fitness_weights.primary)),
                 fitness_vector=list(raw.get("fitness_vector", [])) if raw.get("fitness_vector") is not None else [],
                 penalties=dict(raw.get("penalties", {})),
                 metrics_snapshot=dict(raw.get("metrics_snapshot", {})),
@@ -215,7 +223,7 @@ class TruncatedTrainingEvaluator:
                 fitness_val = float(raw)
             except Exception:
                 fitness_val = 0.0
-            res = EvalResult(fitness_primary=fitness_val, primary_metric="fitness")
+            res = EvalResult(fitness_primary=fitness_val, primary_metric=self.fitness_weights.primary)
 
         # optional truncated checkpoint artifact
         ckpt = self.cfg.checkpoint_io
@@ -236,28 +244,16 @@ class TruncatedTrainingEvaluator:
         # deterministic budget for fair comparison across candidates
         seed_everything(self.budget_cfg.fixed_seed)
 
-        # # Data
-        # train_loader, val_loader = self._data_builder(
-        #     self.train_cfg.data.data_root,
-        #     self.train_cfg.data.batch_size,
-        #     self.train_cfg.data.num_workers,
-        #     self.budget_cfg.fixed_subset_pct,
-        #     self.budget_cfg.fixed_seed,
-        # )
-        #
-        # # Model
-        # model = self._model_builder(self.train_cfg.model.arch, self.train_cfg.model.num_classes).to(self.device)
+        # data / model
         train_loader, val_loader = get_dataloaders(
             root=self.train_cfg.data.data_root,
             batch_size=self.train_cfg.data.batch_size,
             num_workers=self.train_cfg.data.num_workers,
-            # fall back to True if your DataCfg doesn’t define `augment`
             augment=getattr(self.train_cfg.data, "augment", True),
         )
         model = resnet20().to(self.device)
 
-
-        # optimizer & base scheduler
+        # optimizer and base scheduler
         optimizer = build_optimizer(model, self.train_cfg.optim)
 
         # derive steps_per_epoch for schedulers that need it
@@ -275,7 +271,6 @@ class TruncatedTrainingEvaluator:
         base_scheduler = sched_handle.scheduler  # may be None
         step_when = sched_handle.step_when
 
-        # Controller vector coerce to 1d torch tensor on device
         if isinstance(controller_vector, np.ndarray):
             controller_vector = torch.as_tensor(controller_vector, dtype=torch.float32, device=self.device).view(-1)
         elif isinstance(controller_vector, torch.Tensor):
@@ -340,12 +335,12 @@ class TruncatedTrainingEvaluator:
         action_stream: List[float] = []
 
         collectors = HookList([
-            # _BaseSchedulerStepHook(ctrl_scheduler), # step base on every batch
-            extractor, # keep features updated
-            runtime, # controller decisions
-            _CollectEvalPointsHook(val_curve), # (step, val_acc)
-            _CollectActionDeltasHook(action_stream), # delta log lr
-            _DivergenceGuardHook(), # nan/inf guard
+            # _BaseSchedulerStepHook(ctrl_scheduler), # step base on every batch (optional)
+            extractor,  # keep features updated
+            runtime,    # controller decisions
+            _CollectEvalPointsHook(val_curve),  # (step, val_acc)
+            _CollectActionDeltasHook(action_stream),  # delta log lr
+            _DivergenceGuardHook(),  # nan/inf guard
         ])
 
         # train/val scalar parquet logging via hooks
@@ -393,14 +388,35 @@ class TruncatedTrainingEvaluator:
             total_epochs=int(summary.get("final_epoch", 0)),
         )
 
+        # compute the fitness score
+        fitness_score = score_run(run_summary, self.fitness_weights)
+        # extra snapshot metrics are for debugging / parquet
+        auc_val = float(auc(val_curve)) if len(val_curve) >= 2 else 0.0
+        lr_vol = float(np.std(action_stream)) if len(action_stream) >= 2 else 0.0
+
         return {
+            # what the outer evolution loop needs:
+            "fitness": fitness_score,
+            "fitness_primary": fitness_score,
+            "primary_metric": self.fitness_weights.primary,
+
+            # for visibility / logging
             "summary": run_summary,
             "final_val_acc": run_summary.final_val_acc,
             "val_curve_points": len(run_summary.val_acc_curve),
             "num_actions": len(run_summary.action_deltas),
             "diverged": run_summary.diverged,
-        }
 
+            # snapshot for parquet/debug
+            "metrics_snapshot": {
+                "auc_val_acc": auc_val,
+                "final_val_acc": run_summary.final_val_acc,
+                "lr_delta_std": lr_vol,
+                "diverged": float(run_summary.diverged),
+                "total_steps": float(run_summary.total_steps),
+                "total_epochs": float(run_summary.total_epochs),
+            },
+        }
 
     def _peek_loader_len(self) -> int:
         try:

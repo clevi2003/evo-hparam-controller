@@ -13,7 +13,6 @@ from src.core.config import load_train_cfg, load_controller_cfg, load_evolve_cfg
 from src.utils.seed_device import seed_everything
 from src.controller.serialization import flatten_params, to_numpy
 from src.evolution.evaluator import TruncatedTrainingEvaluator, EvaluatorConfig
-#from src.evolution.fitness import FitnessWeights, score_run
 from src.evolution.algorithms import Strategy, GA, GAConfig, ES, ESConfig, Genome
 from src.controller.controller import ControllerMLP
 from src.training.run_io import ensure_run_tree
@@ -21,7 +20,7 @@ from src.training.run_context import RunContext
 from src.core.logging.loggers import make_evo_candidates_logger, make_gen_summary_logger
 from src.evolution.eval_helpers import compose_candidate_row, compose_gen_summary_row, describe_candidate
 from src.training.checkpoints import CheckpointIO
-
+from src.evolution.fitness import FitnessWeights
 from tqdm import tqdm
 
 
@@ -120,11 +119,20 @@ def run(args: argparse.Namespace) -> None:
 
     # init evaluator
     artifacts_dir = None if args.no_artifacts else (out_dir / "artifacts")
+
+    # choose fitness weights. TODO add these from evo_cfg rather than hardcoding
+    fitness_w = FitnessWeights(
+        primary="auc_val_acc", # or "final_val_acc"
+        lr_volatility_weight=0.10, # small penalty on std of delta log lr
+        nan_penalty=100.0, # strong penalty for divergence
+    )
+
     eval_cfg = EvaluatorConfig(
         out_dir=artifacts_dir,
         write_train_val_logs=True,
         write_controller_ticks=True,
-        checkpoint_io=ckpt_io
+        checkpoint_io=ckpt_io,
+        fitness_weights=fitness_w,
     )
     evaluator = TruncatedTrainingEvaluator(
         train_cfg=train_cfg,

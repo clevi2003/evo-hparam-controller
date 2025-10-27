@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator, Iterable, List, Optional, Tuple
@@ -205,3 +206,24 @@ def load_vector(path: str | Path, device: Optional[torch.device] = None, dtype: 
     if device is not None:
         vec = vec.to(device)
     return vec.view(-1)
+
+def controller_version_hash_from_vector(vec: np.ndarray | torch.Tensor) -> str:
+    """
+    deterministic short hash tag from a flat vector (numpy or torch)
+    """
+    if isinstance(vec, torch.Tensor):
+        arr = vec.detach().contiguous().view(-1).to("cpu", dtype=torch.float32).numpy()
+    else:
+        arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+    h = hashlib.sha1(arr.tobytes()).hexdigest()
+    return h[:12]
+
+def controller_version_hash(model: torch.nn.Module) -> str:
+    """
+    deterministic short hash tag from a torch module's state_dict values
+    """
+    h = hashlib.sha1()
+    with torch.no_grad():
+        for v in model.state_dict().values():
+            h.update(v.detach().cpu().contiguous().numpy().tobytes())
+    return h.hexdigest()[:12]
