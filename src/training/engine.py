@@ -159,6 +159,10 @@ class Trainer:
             "acc": None,
             "val_loss": None,
             "val_acc": None,
+            "best_val_acc": None,
+            "t_train": None,
+            "epoch_avg_t": None,
+            "samples_per_s": None,
             "lr": _get_current_lr(self.optimizer),
             "grad_norm": None,
         }
@@ -323,14 +327,16 @@ class Trainer:
         total_samples = sum(s for s, t in data)
         total_t_epoch = sum(t for s, t in data)
 
-        state['t_epoch']       = total_t_epoch / total_epochs
-        state['samples_per_s'] = total_samples / max(total_time, 1e-9)
-        state['t_train']       = t_train
+        # update state for logging
+        state['t_train']         = t_train
+        state['epoch_avg_t']     = total_t_epoch / total_epochs
+        state['samples_per_s']   = total_samples / train_t
+        state['best_val_acc']    = float(self.best_val_acc if self.best_val_acc != float("-inf") else (state.get("val_acc") or 0.0))
         
         self.hooks.on_train_end(state)
 
         return {
-            "best_val_acc": float(self.best_val_acc if self.best_val_acc != float("-inf") else (state.get("val_acc") or 0.0)),
+            "best_val_acc": float(state.get('best_val_acc') or 0.0),
             "final_val_acc": float(state.get("val_acc") or 0.0),
             "final_train_acc": float(state.get("acc") or 0.0),
             "final_epoch": int(state.get("epoch", total_epochs - 1)),
