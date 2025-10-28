@@ -1,11 +1,17 @@
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 =======
+=======
+>>>>>>> Stashed changes
 mode: "evolve" # ["baseline", "evolve", "controlled-train"]
 
 controller_run:
   ckpt_path: "some_path/controller_best.pt" # REQUIRED if mode is "controlled-train"
   enabled: true
 
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 seed: 1337
 exp_name: "resnet20_cifar10"
@@ -33,6 +39,7 @@ optim:
 scheduler:
   name: "cosine"
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   t_max: 200   # used by cosine
   step_size: 80
   gamma: 0.1
@@ -45,6 +52,8 @@ train:
   grad_clip_norm: null
   deterministic: false
 =======
+=======
+>>>>>>> Stashed changes
   t_max: 2 # used by cosine (small for testing)
   step_size: 80
   gamma: 0.1
@@ -56,6 +65,9 @@ train:
   label_smoothing: 0.0
   grad_clip_norm: null
   deterministic: true
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 
 # Checkpointing
