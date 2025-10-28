@@ -4,6 +4,8 @@ import sys
 import torch
 from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
+import time
+# from torch.profiler import profiler, ProfilerActivity
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
 StepWhen = Literal["batch", "epoch", "disabled"]
@@ -163,6 +165,9 @@ class Trainer:
 
         self.hooks.on_train_start(state)
 
+        t_train_start = time.perf_counter()
+        epoch_data = []
+
         # epoch progress bar
         with _tqdm(
             total=total_epochs,
@@ -174,6 +179,13 @@ class Trainer:
             for epoch in range(total_epochs):
                 state["epoch"] = epoch
                 self.hooks.on_epoch_start(state)
+
+                # sync for cuda timings
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+                t_epoch_start = time.perf_counter()
+                epoch_samples = 0
 
                 # training epoch
                 self.model.train(True)
@@ -202,6 +214,9 @@ class Trainer:
                         inputs, targets = self._unpack_batch(batch)
                         inputs = inputs.to(self.device, non_blocking=True)
                         targets = targets.to(self.device, non_blocking=True)
+
+                        # keeping a running total of samples for the throughput
+                        epoch_samples += int(targets.size(0))
 
                         self.hooks.on_batch_start(state)
 
@@ -264,6 +279,16 @@ class Trainer:
                         # budget check after finishing the batch
                         if budget_steps is not None and self.global_step >= budget_steps:
                             break
+                
+                # sync for accurate cuda timings
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+                t_epoch_end = time.perf_counter()
+                t_epoch = t_epoch_end - t_epoch_start
+
+                data = (epoch_samples, t_epoch)
+                epoch_data.append(data)
 
                 # validation once per epoch
                 if self.val_loader is not None:
@@ -290,8 +315,18 @@ class Trainer:
                 # early exit if budget maxed out
                 if budget_steps is not None and self.global_step >= budget_steps:
                     break
-
+    
         # train end
+        t_train_end = time.perf_counter()
+
+        t_train       = t_train_end - t_train_start
+        total_samples = sum(s for s, t in data)
+        total_t_epoch = sum(t for s, t in data)
+
+        state['t_epoch']       = total_t_epoch / total_epochs
+        state['samples_per_s'] = total_samples / max(total_time, 1e-9)
+        state['t_train']       = t_train
+        
         self.hooks.on_train_end(state)
 
         return {
