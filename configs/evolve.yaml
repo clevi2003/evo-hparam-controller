@@ -1,0 +1,16 @@
+search:
+  algo: "ga" # or "es" or "cmaes"
+  pop_size: 2
+  parents: 1
+  mutate_sigma: 0.05
+  elite: 1
+  gens: 5
+budget:
+  epochs: 2
+  fixed_seed: 2025
+  fixed_subset_pct: 0.1
+fitness:
+  primary: "auc_val_acc"
+  penalties:
+    lr_volatility_weight: 0.1
+    nan_penalty: 100.0

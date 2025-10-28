@@ -1,3 +1,9 @@
+mode: "evolve" # ["baseline", "evolve", "controlled-train"]
+
+controller_run:
+  ckpt_path: "some_path/controller_best.pt" # REQUIRED if mode is "controlled-train"
+  enabled: true
+
 seed: 1337
 exp_name: "resnet20_cifar10"
 
@@ -23,17 +29,17 @@ optim:
 # Scheduler: one of [cosine, onecycle, step, none]
 scheduler:
   name: "cosine"
-  t_max: 200   # used by cosine
+  t_max: 2 # used by cosine (small for testing)
   step_size: 80
   gamma: 0.1
-  pct_start: 0.1  # OneCycle
+  pct_start: 0.1 # used by OneCycle
 
 # Training
 train:
-  epochs: 200
+  epochs: 3 # set to a low number for testing; use 200 for full training
   label_smoothing: 0.0
   grad_clip_norm: null
-  deterministic: false
+  deterministic: true
 
 # Checkpointing
 ckpt:
