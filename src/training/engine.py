@@ -345,8 +345,8 @@ class Trainer:
         t_train_end = time.perf_counter()
         t_train = t_train_end - t_train_start
 
-        total_samples = sum(s for s, t in data)
-        total_t_epoch = sum(t for s, t in data)
+        total_samples = sum(s for s, t in epoch_data)
+        total_t_epoch = sum(t for s, t in epoch_data)
         
 
         # logging

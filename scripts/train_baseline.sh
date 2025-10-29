@@ -10,6 +10,5 @@ PY
 export SSL_CERT_FILE="$(python -c 'import certifi; print(certifi.where())')"
 
 python -m src.train \
-  --config configs/baseline.yaml \
-  --exp-name resnet20_cosine
+  --config configs/baseline.yaml
 

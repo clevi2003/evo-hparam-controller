@@ -313,7 +313,7 @@ def make_evo_candidates_logger(path: Union[str, Path]) -> Logger:
     return Logger(ParquetAppender(path, schema=EVO_CANDIDATES_SCHEMA, buffer_rows=1024))
 
 def make_gen_summary_logger(path: Union[str, Path]) -> Logger:
-    return Logger(ParquetAppender(path, schema=GEN_SUMMARY_SCHEMA, buffer_rows=256))
+    return Logger(ParquetAppender(path, schema=EVO_GEN_SUMMARY_SCHEMA, buffer_rows=256))
 
 def make_controller_calls_logger(path: Union[str, Path],
                                partitioned: bool = False,
