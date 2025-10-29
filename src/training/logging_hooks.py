@@ -83,6 +83,43 @@ class _TrainMetricsHook(Hook):
         except Exception:
             pass
 
+    def on_train_end(self, state: Dict[str, Any]) -> None:
+        '''
+        Losses
+            train loss (raw and EMA)
+            possibly validation losses too.
+        Accuracy
+            train/val accuracy per epoch
+                Top-1
+                Possibly top-5
+        Optimization stats
+            Momentum/β1/β2, weight decay
+                actual values if they change
+            Number of gradient-clip events per epoch
+            Update ratio ‖deltaθ‖/‖θ‖ EMA 
+                useful for diagnosing too-small/too-large steps
+        Stability flags
+            Any NaN/Inf occurrences
+            divergence counters
+            early-stop reasons
+        Throughput
+            FLOPs estimate if possible
+        '''
+
+        try:
+            row = {
+                "event": "train_end",
+                "best_val_acc": _to_float(state.get("best_val_acc")),
+                "t_per_epoch": _to_float(state.get("epoch_avg_t")),
+                "t_train": _to_float(state.get("t_train")),
+                "divergent_count": int(state.get("divergent_count")),
+                "nan_inf_count_epoch": int(state.get("nan_inf_count_epoch")),
+                
+            }
+            self.write_row
+        except Exception:
+            pass
+
     def close(self) -> None:
         try:
             _flush_if_possible(self._write_row)
@@ -108,6 +145,7 @@ class _ValMetricsHook(Hook):
                 "global_step": int(state.get("global_step", 0)),
                 "val_loss": _to_float(state.get("val_loss")),
                 "val_acc": _to_float(state.get("val_acc")),
+                "best_val_acc": _to_float(state.get("best_val_acc")),
             }
             self._write_row(row)
         except Exception:

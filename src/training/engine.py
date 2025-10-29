@@ -5,6 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
 import time
+import math
 # from torch.profiler import profiler, ProfilerActivity
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
@@ -136,6 +137,9 @@ class Trainer:
         # tqdm control
         # disable if no tty (non-interactive) or user asked to hide
         self._progress_enabled = bool(show_progress) and sys.stderr.isatty()
+        self.nan_inf_count_epoch = 0
+        self.divergence_count = 0
+        self.early_stop_reason = None
 
     def fit(self, *, epochs: Optional[int] = None, max_steps: Optional[int] = None) -> Dict[str, float]:
         """
@@ -165,6 +169,9 @@ class Trainer:
             "samples_per_s": None,
             "lr": _get_current_lr(self.optimizer),
             "grad_norm": None,
+            "nan_inf_count_epoch": 0,
+            "divergence_count": 0,
+            "early_stop_reason": None,
         }
 
         self.hooks.on_train_start(state)
@@ -190,6 +197,7 @@ class Trainer:
 
                 t_epoch_start = time.perf_counter()
                 epoch_samples = 0
+                self.nan_inf_count_epoch = 0
 
                 # training epoch
                 self.model.train(True)
@@ -200,6 +208,7 @@ class Trainer:
                     total_batches = len(self.train_loader)
                 except Exception:
                     total_batches = None
+
 
                 with _tqdm(
                     total=total_batches,
@@ -227,6 +236,9 @@ class Trainer:
                         with torch.cuda.amp.autocast(enabled=self.mixed_precision):
                             logits = self.model(inputs)
                             loss = self.loss_fn(logits, targets)
+
+                            # if not torch.isfinite(loss):
+                            #     self.nan_inf_count_epoch += 1
 
                         # backward
                         self.optimizer.zero_grad(set_to_none=True)
@@ -258,12 +270,21 @@ class Trainer:
                             except Exception:
                                 acc = None
 
+                        grad_norm = _compute_grad_norm(self.model)
+                        loss_scalar = _detach_scalar(loss)
+
                         state["logits"] = logits.detach()
                         state["targets"] = targets.detach()
-                        state["loss"] = _detach_scalar(loss)
+                        state["loss"] = loss_scalar
                         state["acc"] = acc
                         state["lr"] = _get_current_lr(self.optimizer)
-                        state["grad_norm"] = _compute_grad_norm(self.model)
+                        state["grad_norm"] = grad_norm
+
+                        # stability check
+                        if loss_scalar is None or not math.isfinite(loss_scalar):
+                            self.nan_inf_count_epoch += 1
+                        if grad_norm is None or not (float("-inf") < float(grad_norm) < float("inf")):
+                            self.divergence_count += 1
 
                         # progress bar feedback
                         if self._progress_enabled:
@@ -322,17 +343,20 @@ class Trainer:
     
         # train end
         t_train_end = time.perf_counter()
+        t_train = t_train_end - t_train_start
 
-        t_train       = t_train_end - t_train_start
         total_samples = sum(s for s, t in data)
         total_t_epoch = sum(t for s, t in data)
-
-        # update state for logging
-        state['t_train']         = t_train
-        state['epoch_avg_t']     = total_t_epoch / total_epochs
-        state['samples_per_s']   = total_samples / train_t
-        state['best_val_acc']    = float(self.best_val_acc if self.best_val_acc != float("-inf") else (state.get("val_acc") or 0.0))
         
+
+        # logging
+        state['t_train']             = t_train
+        state['epoch_avg_t']         = (total_t_epoch / len(epoch_data)) if len(epoch_data) > 0 else None
+        state['samples_per_s']       = (total_samples / t_train) if t_train > 0 else None
+        state['best_val_acc']        = float(self.best_val_acc if self.best_val_acc != float("-inf") else (state.get("val_acc") or 0.0))
+        state["nan_inf_count_epoch"] = int(self.nan_inf_count_epoch)
+        state["divergence_count"]    = int(self.divergence_count)
+
         self.hooks.on_train_end(state)
 
         return {
@@ -395,6 +419,9 @@ class Trainer:
 
         state["val_loss"] = mean_loss
         state["val_acc"] = acc
+
+        best_so_far = max(self.best_val_acc, float(acc or float("-inf")))
+        state["best_val_acc"] = best_so_far
 
         self.hooks.on_eval_end(state)
         self.model.train(True)
