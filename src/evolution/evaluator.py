@@ -311,8 +311,14 @@ class TruncatedTrainingEvaluator:
             for w in (train_logger, val_logger, ticks_logger):
                 try:
                     if w is not None and hasattr(w, "close"):
+                        try:
+                            w.flush()
+                        except Exception as e:
+                            print("WARNING: failed to flush logger:\n", e)
+                            pass
                         w.close()
-                except Exception:
+                except Exception as e:
+                    print("WARNING: failed to close logger:\n", e)
                     pass
 
         final_val = float(summary.get("final_val_acc", 0.0))
@@ -364,7 +370,8 @@ class TruncatedTrainingEvaluator:
                     "lr":          float(s.get("lr", 0.0) or 0.0),
                     "grad_norm":   float(s.get("grad_norm", 0.0) or 0.0),
                 })
-            except Exception:
+            except Exception as e:
+                print("WARNING: failed to log train:\n", e)
                 pass
 
         def log_val(s: Dict[str, Any]) -> None:
@@ -377,7 +384,8 @@ class TruncatedTrainingEvaluator:
                     "val_loss":    float(s.get("val_loss", 0.0) or 0.0),
                     "val_acc":     float(s.get("val_acc", 0.0) or 0.0),
                 })
-            except Exception:
+            except Exception as e:
+                print("WARNING: failed to log val:\n", e)
                 pass
 
         return HookList([

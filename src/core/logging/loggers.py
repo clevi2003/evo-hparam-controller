@@ -336,6 +336,8 @@ class _SimpleLogger:
         self._app.append(row)
     def close(self) -> None:
         self._app.close()
+    def flush(self):
+        self._app.flush()
 
 class ContextLogger:
     """
@@ -352,6 +354,8 @@ class ContextLogger:
         self._base.close()
     def set_static(self, **kwargs: Any) -> None:
         self._static.update(kwargs)
+    def flush(self):
+        self._base.flush()
 
 class ContextTickLogger:
     """
@@ -375,3 +379,6 @@ class ContextTickLogger:
 
     def set_static(self, **kwargs: Any) -> None:
         self._static.update(kwargs)
+
+    def flush(self):
+        self._base.flush()
