@@ -2,6 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+import sys
+
 from pathlib import Path
 from src.core.hooks.hook_base import Hook
 
@@ -80,45 +82,57 @@ class _TrainMetricsHook(Hook):
         # flush at epoch boundaries for better durability
         try:
             _flush_if_possible(self._write_row)
+            row = {
+                "event": "epoch_end",
+                "nan_inf_flag": int(state.get('nan_inf_flag')),
+                "lr": _to_float(state.get("lr")),
+                "grad_norm": _to_float(state.get("grad_norm")),
+                "acc": _to_float(state.get("acc")),
+                "loss": _to_float(state.get("loss")),
+                "t_epoch": _to_float(state.get("t_epoch")),
+                "samples_per_s": _to_float(state.get("samples_per_s")),
+                "train_loss_raw": _to_float(state.get("train_loss_raw")),
+                "train_loss_ema": _to_float(state.get("train_loss_ema")),
+            }
+
+            self._write_row(row)
+            print(f"End of epoch {row.get('epoch', '?')}: {row}")
+            
         except Exception:
             pass
 
     def on_train_end(self, state: Dict[str, Any]) -> None:
-        '''
-        Losses
-            train loss (raw and EMA)
-            possibly validation losses too.
-        Accuracy
-            train/val accuracy per epoch
-                Top-1
-                Possibly top-5
-        Optimization stats
-            Momentum/β1/β2, weight decay
-                actual values if they change
-            Number of gradient-clip events per epoch
-            Update ratio ‖deltaθ‖/‖θ‖ EMA 
-                useful for diagnosing too-small/too-large steps
-        Stability flags
-            Any NaN/Inf occurrences
-            divergence counters
-            early-stop reasons
-        Throughput
-            FLOPs estimate if possible
-        '''
-
         try:
+            _flush_if_possible(self._write_row)
             row = {
                 "event": "train_end",
-                "best_val_acc": _to_float(state.get("best_val_acc")),
-                "t_per_epoch": _to_float(state.get("epoch_avg_t")),
-                "t_train": _to_float(state.get("t_train")),
-                "divergent_count": int(state.get("divergent_count")),
-                "nan_inf_count_epoch": int(state.get("nan_inf_count_epoch")),
                 
+                # end results
+                "best_val_acc": _to_float(state.get("best_val_acc")),
+                "final_train_loss": _to_float(state.get("loss")),
+                "final_train_acc": _to_float(state.get("acc")),
+                "lr": _to_float(state.get("lr")),
+                "grad_norm": _to_float(state.get("grad_norm")),
+                "train_loss_raw": _to_float(state.get("train_loss_raw")),
+                "train_loss_ema": _to_float(state.get("train_loss_ema")),
+
+                # throughput
+                "t_train": _to_float(state.get("t_train")),
+                "t_per_epoch": _to_float(state.get("epoch_avg_t")),
+                "samples_per_s": _to_float(state.get("samples_per_s")),
+                # <TODO: FLOPS>
+
+                # stability
+                "divergence_count": int(state.get("divergence_count", 0)),
+                "early_stop_reasons": state.get("early_stop_reasons", None),
             }
-            self.write_row
-        except Exception:
-            pass
+            self._write_row(row)
+            print(f"Final training stats: {row}")
+        except Exception as e:
+            try:
+                print("TrainMetricsHook on_train_end error:", e, file=sys.stderr)
+            except Exception:
+                pass
 
     def close(self) -> None:
         try:

@@ -134,12 +134,11 @@ class Trainer:
         self.cfg = cfg
         self.global_step = 0
         self.best_val_acc = float("-inf")
+        self.train_loss_ema = None
         # tqdm control
         # disable if no tty (non-interactive) or user asked to hide
         self._progress_enabled = bool(show_progress) and sys.stderr.isatty()
-        self.nan_inf_count_epoch = 0
         self.divergence_count = 0
-        self.early_stop_reason = None
 
     def fit(self, *, epochs: Optional[int] = None, max_steps: Optional[int] = None) -> Dict[str, float]:
         """
@@ -169,14 +168,17 @@ class Trainer:
             "samples_per_s": None,
             "lr": _get_current_lr(self.optimizer),
             "grad_norm": None,
-            "nan_inf_count_epoch": 0,
+            "nan_inf_flag": 0,
             "divergence_count": 0,
-            "early_stop_reason": None,
+            "early_stop_reasons": [],
+            "T_epoch": 0.0,
+            "train_loss_raw": None,
+            "train_loss_ema": None,
         }
 
         self.hooks.on_train_start(state)
 
-        t_train_start = time.perf_counter()
+        T_train_start = time.perf_counter()
         epoch_data = []
 
         # epoch progress bar
@@ -195,9 +197,11 @@ class Trainer:
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
 
-                t_epoch_start = time.perf_counter()
+                # per epoch logging
+                T_epoch_start = time.perf_counter()
                 epoch_samples = 0
-                self.nan_inf_count_epoch = 0
+                grad_clips_per_epoch = 0
+                nan_inf_flag = 0
 
                 # training epoch
                 self.model.train(True)
@@ -216,6 +220,8 @@ class Trainer:
                     leave=False,
                     disable=not self._progress_enabled,
                 ) as pbar_train:
+                    
+                    sum_train_loss, sum_train_count = 0.0, 0
 
                     for batch_idx, batch in enumerate(self.train_loader):
                         state["batch_idx"] = batch_idx
@@ -237,9 +243,6 @@ class Trainer:
                             logits = self.model(inputs)
                             loss = self.loss_fn(logits, targets)
 
-                            # if not torch.isfinite(loss):
-                            #     self.nan_inf_count_epoch += 1
-
                         # backward
                         self.optimizer.zero_grad(set_to_none=True)
 
@@ -258,6 +261,8 @@ class Trainer:
                             self.hooks.on_before_optimizer_step(state)
                             self.optimizer.step()
                             self.hooks.on_after_optimizer_step(state)
+
+                        # TODO gradient clipping
 
                         # update counters and collect metrics
                         self.global_step += 1
@@ -280,9 +285,24 @@ class Trainer:
                         state["lr"] = _get_current_lr(self.optimizer)
                         state["grad_norm"] = grad_norm
 
-                        # stability check
+                        # raw loss
+                        if loss_scalar is not None:
+                            batch_size = int(targets.size(0))
+                            sum_train_loss += float(loss_scalar) * batch_size # weight by batch_size to account for inconsistency
+                            sum_train_count += batch_size
+                        state["train_loss_raw"] = (sum_train_loss / sum_train_count) if sum_train_count else None
+
+                        # ema loss
+                        if loss_scalar is not None:
+                            if self.train_loss_ema is None:
+                                self.train_loss_ema = loss_scalar
+                            else:
+                                self.train_loss_ema = 0.9 * self.train_loss_ema + 0.1 * loss_scalar
+                        state["train_loss_ema"] = self.train_loss_ema
+
+                        # stability checks
                         if loss_scalar is None or not math.isfinite(loss_scalar):
-                            self.nan_inf_count_epoch += 1
+                            nan_inf_flag = 1
                         if grad_norm is None or not (float("-inf") < float(grad_norm) < float("inf")):
                             self.divergence_count += 1
 
@@ -309,10 +329,10 @@ class Trainer:
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
 
-                t_epoch_end = time.perf_counter()
-                t_epoch = t_epoch_end - t_epoch_start
-
-                data = (epoch_samples, t_epoch)
+                T_epoch_end = time.perf_counter()
+                T_epoch = T_epoch_end - T_epoch_start
+                
+                data = (epoch_samples, T_epoch)
                 epoch_data.append(data)
 
                 # validation once per epoch
@@ -322,6 +342,12 @@ class Trainer:
                 # scheduler step per-epoch if requested
                 if self.scheduler is not None and self.scheduler_step_when == "epoch":
                     self.scheduler.step()
+
+                state['nan_inf_flag'] = nan_inf_flag
+                state['T_epoch'] = T_epoch
+                state['samples_per_s'] = epoch_samples / T_epoch
+                state['train_loss_raw'] = (sum_train_loss / sum_train_count) if sum_train_count else None
+                state['grad_clips_per_epoch'] = int(grad_clips_per_epoch)
 
                 self.hooks.on_epoch_end(state)
 
@@ -339,23 +365,22 @@ class Trainer:
 
                 # early exit if budget maxed out
                 if budget_steps is not None and self.global_step >= budget_steps:
+                    state['early_stop_reasons'].append('budget maxed out')
                     break
     
         # train end
-        t_train_end = time.perf_counter()
-        t_train = t_train_end - t_train_start
+        T_train_end = time.perf_counter()
+        T_train = T_train_end - T_train_start
 
         total_samples = sum(s for s, t in epoch_data)
-        total_t_epoch = sum(t for s, t in epoch_data)
+        total_T_epoch = sum(t for s, t in epoch_data)
         
-
         # logging
-        state['t_train']             = t_train
-        state['epoch_avg_t']         = (total_t_epoch / len(epoch_data)) if len(epoch_data) > 0 else None
-        state['samples_per_s']       = (total_samples / t_train) if t_train > 0 else None
+        state['t_train']             = T_train
+        state['epoch_avg_t']         = (total_T_epoch / len(epoch_data)) if len(epoch_data) > 0 else None
+        state['samples_per_s']       = (total_samples / T_train) if T_train > 0 else None
         state['best_val_acc']        = float(self.best_val_acc if self.best_val_acc != float("-inf") else (state.get("val_acc") or 0.0))
-        state["nan_inf_count_epoch"] = int(self.nan_inf_count_epoch)
-        state["divergence_count"]    = int(self.divergence_count)
+        state['divergence_count']    = int(self.divergence_count)
 
         self.hooks.on_train_end(state)
 
@@ -421,7 +446,8 @@ class Trainer:
         state["val_acc"] = acc
 
         best_so_far = max(self.best_val_acc, float(acc or float("-inf")))
-        state["best_val_acc"] = best_so_far
+        self.best_val_acc = best_so_far
+        state['best_val_acc'] = float(self.best_val_acc)
 
         self.hooks.on_eval_end(state)
         self.model.train(True)
