@@ -71,12 +71,12 @@ def _compute_grad_norm(model: torch.nn.Module) -> Optional[float]:
     return float(total ** 0.5)
 
 def _compute_ema(new, ema, alpha):
-    if new is not None:
-        if ema is None:
-            return float(new)
-        else:
-            a = float(alpha)
-            return (1.0 - a) * float(ema) + a * float(new)
+    if new is None:
+        return ema
+    a = float(alpha)
+    new = float(new)
+    return new if ema is None else (1.0 - a) * float(ema) + a * new
+
 
 
 def _get_current_lr(optimizer: torch.optim.Optimizer) -> float:
@@ -93,6 +93,17 @@ def _get_betas(optimizer: torch.optim.Optimizer) -> float:
     betas = optimizer.param_groups[0].get("betas", None)
     return (float(betas[0]), float(betas[1])) if betas else (None, None)
             
+def _get_opt_hparams(optimizer):
+    base = getattr(optimizer, "base_optimizer", None) or getattr(optimizer, "optimizer", None)
+    if base is not None: optimizer = base
+    pg = optimizer.param_groups[0]
+    out = {}
+    if "weight_decay" in pg: out["weight_decay"] = float(pg["weight_decay"])
+    if "momentum" in pg:     out["momentum"]     = float(pg["momentum"])
+    if "betas" in pg and pg["betas"] is not None:
+        b0, b1 = pg["betas"]; out["beta1"], out["beta2"] = float(b0), float(b1)
+    return out
+
 class Trainer:
     """
     hook driven training engine with tqdm progress bars
@@ -150,14 +161,23 @@ class Trainer:
         self.hooks = hooks or NullHook()
         self.cfg = cfg
         self.global_step = 0
-        self.ema_alpha = 0.1
-        self.train_loss_ema = None
-        self.grad_norm_ema = None
-        self.update_ratio_ema = None
         # tqdm control
         # disable if no tty (non-interactive) or user asked to hide
         self._progress_enabled = bool(show_progress) and sys.stderr.isatty()
         self.divergence_count = 0
+
+        # step EMAs (updated every batch)
+        self.ema_global_step_alpha = 0.03   # TODO add to config?
+        self.train_loss_ema_step = None
+        self.grad_norm_ema_step = None
+        self.update_ratio_ema_step = None
+
+        # epoch EMAs (updated once per epoch)
+        self.ema_epoch_alpha = 0.1          # TODO add to config?
+        self.train_loss_ema_epoch = None
+        self.grad_norm_ema_epoch = None
+        self.update_ratio_ema_epoch = None
+
 
     def fit(self, *, epochs: Optional[int] = None, max_steps: Optional[int] = None) -> Dict[str, float]:
         """
@@ -176,6 +196,7 @@ class Trainer:
             "device": self.device,
             "cfg": self.cfg,
             "model": self.model,
+            "grad_clip_norm": self.grad_clip,
             # live scalars
             "loss": None,
             "acc": None,
@@ -186,13 +207,18 @@ class Trainer:
             "samples_per_s": None,
             "lr": _get_current_lr(self.optimizer),
             "grad_norm": None,
-            "grad_norm_ema": None,
             "nan_inf_flag": 0,
             "divergence_count": 0,
             "early_stop_reasons": [],
             "T_epoch": 0.0,
             "train_loss_raw": None,
-            "train_loss_ema": None,
+            "update_ratio": None,
+            "train_loss_ema_step": None,
+            "grad_norm_ema_step": None,
+            "update_ratio_ema_step": None,
+            "train_loss_ema_epoch": None,
+            "grad_norm_ema_epoch": None,
+            "update_ratio_ema_epoch": None,
         }
 
         self.hooks.on_train_start(state)
@@ -240,6 +266,10 @@ class Trainer:
                 ) as pbar_train:
                     
                     sum_train_loss, sum_train_count = 0.0, 0
+                    epoch_grad_norm_sum = 0.0
+                    epoch_grad_norm_n = 0
+                    epoch_update_ratio_sum = 0.0
+                    epoch_update_ratio_n = 0
 
                     for batch_idx, batch in enumerate(self.train_loader):
                         state["batch_idx"] = batch_idx
@@ -287,9 +317,7 @@ class Trainer:
                                 after = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
                                 delta = after - before
                                 ratio = (delta.norm(2) / (before.norm(2) + 1e-12)).item()
-                                self.update_ratio_ema = _compute_ema(ratio, self.update_ratio_ema, self.ema_alpha)
                             state["update_ratio"] = ratio
-                            state["update_ratio_ema"] = self.update_ratio_ema
                             self.hooks.on_after_optimizer_step(state)
 
                         # update counters and collect metrics
@@ -303,12 +331,33 @@ class Trainer:
                             except Exception:
                                 acc = None
 
-                        # grad norm and grad norm ema
+                        # grad norm
                         grad_norm = _compute_grad_norm(self.model)
-                        self.grad_norm_ema = _compute_ema(grad_norm, self.grad_norm_ema, self.ema_alpha)
-                        state["grad_norm_ema"] = self.grad_norm_ema
-
                         loss_scalar = _detach_scalar(loss)
+
+                        # global step emas
+                        self.train_loss_ema_step = _compute_ema(
+                            loss_scalar, self.train_loss_ema_step, self.ema_global_step_alpha
+                        )
+                        self.grad_norm_ema_step = _compute_ema(
+                            grad_norm, self.grad_norm_ema_step, self.ema_global_step_alpha
+                        )
+                        if "update_ratio" in state and state["update_ratio"] is not None:
+                            self.update_ratio_ema_step = _compute_ema(
+                                state["update_ratio"], self.update_ratio_ema_step, self.ema_global_step_alpha
+                            )
+
+                        state["train_loss_ema_step"]   = self.train_loss_ema_step
+                        state["grad_norm_ema_step"]    = self.grad_norm_ema_step
+                        state["update_ratio_ema_step"] = self.update_ratio_ema_step
+
+                        if grad_norm is not None:
+                            epoch_grad_norm_sum += float(grad_norm)
+                            epoch_grad_norm_n += 1
+
+                        if "update_ratio" in state and state["update_ratio"] is not None:
+                            epoch_update_ratio_sum += float(state["update_ratio"])
+                            epoch_update_ratio_n += 1
 
                         state["logits"] = logits.detach()
                         state["targets"] = targets.detach()
@@ -332,10 +381,6 @@ class Trainer:
                             sum_train_count += batch_size
                         state["train_loss_raw"] = (sum_train_loss / sum_train_count) if sum_train_count else None
 
-                        # ema loss
-                        self.train_loss_ema = _compute_ema(loss_scalar, self.train_loss_ema, self.ema_alpha)
-                        state["train_loss_ema"] = self.train_loss_ema
-
                         # stability checks
                         if loss_scalar is None or not math.isfinite(loss_scalar):
                             nan_inf_flag = 1
@@ -351,6 +396,8 @@ class Trainer:
                             )
                             pbar_train.update(1)
 
+                        state.update(_get_opt_hparams(self.optimizer))
+
                         self.hooks.on_batch_end(state)
 
                         # cleanup heavy tensors in state
@@ -360,7 +407,28 @@ class Trainer:
                         # budget check after finishing the batch
                         if budget_steps is not None and self.global_step >= budget_steps:
                             break
-                
+
+                # Compute epoch means
+                epoch_loss_mean = (sum_train_loss / sum_train_count) if sum_train_count else None
+                epoch_grad_norm_mean = (epoch_grad_norm_sum / epoch_grad_norm_n) if epoch_grad_norm_n else None
+                epoch_update_ratio_mean = (epoch_update_ratio_sum / epoch_update_ratio_n) if epoch_update_ratio_n else None
+
+                # Update epoch EMAs
+                self.train_loss_ema_epoch = _compute_ema(
+                    epoch_loss_mean, self.train_loss_ema_epoch, self.ema_epoch_alpha
+                )
+                self.grad_norm_ema_epoch = _compute_ema(
+                    epoch_grad_norm_mean, self.grad_norm_ema_epoch, self.ema_epoch_alpha
+                )
+                self.update_ratio_ema_epoch = _compute_ema(
+                    epoch_update_ratio_mean, self.update_ratio_ema_epoch, self.ema_epoch_alpha
+                )
+
+                # Expose epoch EMAs on state for logging
+                state["train_loss_ema_epoch"] = self.train_loss_ema_epoch
+                state["grad_norm_ema_epoch"]  = self.grad_norm_ema_epoch
+                state["update_ratio_ema_epoch"] = self.update_ratio_ema_epoch
+
                 # sync for accurate cuda timings
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()

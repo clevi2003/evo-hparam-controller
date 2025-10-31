@@ -31,6 +31,7 @@ def _as_row_writer(writer_like: Any) -> Callable[[Dict[str, Any]], None]:
     )
 
 
+# TODO make sure this works, I was having difficulties when directly using the writer_like object - Zack
 def _flush_if_possible(writer_like: Any) -> None:
     for name in ("flush", "close"):
         fn = getattr(writer_like, name, None)
@@ -73,10 +74,15 @@ class _TrainMetricsHook(Hook):
                 "acc": _to_float(state.get("acc")),
                 "lr": _to_float(state.get("lr")),
                 "grad_norm": _to_float(state.get("grad_norm")),
-                "grad_norm_ema": _to_float(state.get("grad_norm_ema")),
                 "clip": int(bool(state.get("clip", False))),
                 "update_ratio": _to_float(state.get("update_ratio")),
-                "update_ratio_ema": _to_float(state.get("update_ratio_ema")),
+                "train_loss_ema": _to_float(state.get("train_loss_ema_step")),
+                "grad_norm_ema": _to_float(state.get("grad_norm_ema_step")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema_step")),
+                "momentum": _to_float(state.get("momentum")),
+                "beta1": _to_float(state.get("beta1")),
+                "beta2": _to_float(state.get("beta2")),
+                "weight_decay": _to_float(state.get("weight_decay")),
             }
             # print(f'\n{row}\n')
             self._write_row(row)
@@ -93,19 +99,19 @@ class _TrainMetricsHook(Hook):
                 "nan_inf_flag": int(state.get("nan_inf_flag", 0)),
                 "lr": _to_float(state.get("lr")),
                 "grad_norm": _to_float(state.get("grad_norm")),
-                "grad_norm_ema": _to_float(state.get("grad_norm_ema")),
                 "momentum": _to_float(state.get("momentum")),
                 "beta1": _to_float(state.get("beta1")),
                 "beta2": _to_float(state.get("beta2")),
                 "weight_decay": _to_float(state.get("weight_decay")),
                 "update_ratio": _to_float(state.get("update_ratio")),
-                "update_ratio_ema": _to_float(state.get("update_ratio_ema")),
                 "acc": _to_float(state.get("acc")),
                 "loss": _to_float(state.get("loss")),
                 "T_epoch": _to_float(state.get("T_epoch")),
                 "samples_per_s": _to_float(state.get("samples_per_s")),
                 "train_loss_raw": _to_float(state.get("train_loss_raw")),
-                "train_loss_ema": _to_float(state.get("train_loss_ema")),
+                "train_loss_ema": _to_float(state.get("train_loss_ema_epoch")),
+                "grad_norm_ema": _to_float(state.get("grad_norm_ema_epoch")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema_epoch")),
             }
             # print(f'\n{row}\n')
             self._write_row(row)
@@ -125,14 +131,15 @@ class _TrainMetricsHook(Hook):
                 "final_train_acc": _to_float(state.get("acc")),
                 "lr": _to_float(state.get("lr")),
                 "grad_norm": _to_float(state.get("grad_norm")),
-                "grad_norm_ema": _to_float(state.get("grad_norm_ema")),
-                "train_loss_raw": _to_float(state.get("train_loss_raw")),
-                "train_loss_ema": _to_float(state.get("train_loss_ema")),
                 "final_train_acc": float(state.get("acc") or 0.0),
                 "momentum": _to_float(state.get("momentum")),
                 "beta1": _to_float(state.get("beta1")),
                 "beta2": _to_float(state.get("beta2")),
                 "weight_decay": _to_float(state.get("weight_decay")),
+                "train_loss_raw": _to_float(state.get("train_loss_raw")),
+                "train_loss_ema": _to_float(state.get("train_loss_ema_epoch")),
+                "grad_norm_ema": _to_float(state.get("grad_norm_ema_epoch")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema_epoch")),
 
                 # throughput
                 "T_train": _to_float(state.get("T_train")),
