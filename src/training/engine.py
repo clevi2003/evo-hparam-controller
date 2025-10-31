@@ -6,7 +6,6 @@ from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
 import time
 import math
-# from torch.profiler import profiler, ProfilerActivity
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
 StepWhen = Literal["batch", "epoch", "disabled"]
@@ -71,6 +70,14 @@ def _compute_grad_norm(model: torch.nn.Module) -> Optional[float]:
         return None
     return float(total ** 0.5)
 
+def _compute_ema(new, ema, alpha):
+    if new is not None:
+        if ema is None:
+            return float(new)
+        else:
+            a = float(alpha)
+            return (1.0 - a) * float(ema) + a * float(new)
+
 
 def _get_current_lr(optimizer: torch.optim.Optimizer) -> float:
     # assume single param group for reporting; fine for CIFAR baselines
@@ -129,21 +136,24 @@ class Trainer:
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.scheduler_step_when = scheduler_step_when
+        self.metric_fn = _default_accuracy_fn if metric_fn is None else metric_fn
         self.loss_fn = loss_fn
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
+        self.best_val_acc = float("-inf")
         self.epochs = int(epochs)
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.grad_clip = grad_clip
-        self.metric_fn = metric_fn
         self.mixed_precision = mixed_precision
         self.scaler = torch.cuda.amp.GradScaler(enabled=mixed_precision)
         self.hooks = hooks or NullHook()
         self.cfg = cfg
         self.global_step = 0
-        self.best_val_acc = float("-inf")
+        self.ema_alpha = 0.1
         self.train_loss_ema = None
+        self.grad_norm_ema = None
+        self.update_ratio_ema = None
         # tqdm control
         # disable if no tty (non-interactive) or user asked to hide
         self._progress_enabled = bool(show_progress) and sys.stderr.isatty()
@@ -171,12 +181,12 @@ class Trainer:
             "acc": None,
             "val_loss": None,
             "val_acc": None,
-            "best_val_acc": None,
             "T_train": None,
             "epoch_avg_T": None,
             "samples_per_s": None,
             "lr": _get_current_lr(self.optimizer),
             "grad_norm": None,
+            "grad_norm_ema": None,
             "nan_inf_flag": 0,
             "divergence_count": 0,
             "early_stop_reasons": [],
@@ -253,7 +263,6 @@ class Trainer:
 
                         # backward
                         self.optimizer.zero_grad(set_to_none=True)
-                        
 
                         if self.mixed_precision:
                             self.scaler.scale(loss).backward()
@@ -278,7 +287,7 @@ class Trainer:
                                 after = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
                                 delta = after - before
                                 ratio = (delta.norm(2) / (before.norm(2) + 1e-12)).item()
-                                self.update_ratio_ema = 0.9 * getattr(self, "update_ratio_ema", ratio) + 0.1 * ratio
+                                self.update_ratio_ema = _compute_ema(ratio, self.update_ratio_ema, self.ema_alpha)
                             state["update_ratio"] = ratio
                             state["update_ratio_ema"] = self.update_ratio_ema
                             self.hooks.on_after_optimizer_step(state)
@@ -294,7 +303,11 @@ class Trainer:
                             except Exception:
                                 acc = None
 
+                        # grad norm and grad norm ema
                         grad_norm = _compute_grad_norm(self.model)
+                        self.grad_norm_ema = _compute_ema(grad_norm, self.grad_norm_ema, self.ema_alpha)
+                        state["grad_norm_ema"] = self.grad_norm_ema
+
                         loss_scalar = _detach_scalar(loss)
 
                         state["logits"] = logits.detach()
@@ -320,11 +333,7 @@ class Trainer:
                         state["train_loss_raw"] = (sum_train_loss / sum_train_count) if sum_train_count else None
 
                         # ema loss
-                        if loss_scalar is not None:
-                            if self.train_loss_ema is None:
-                                self.train_loss_ema = loss_scalar
-                            else:
-                                self.train_loss_ema = 0.9 * self.train_loss_ema + 0.1 * loss_scalar
+                        self.train_loss_ema = _compute_ema(loss_scalar, self.train_loss_ema, self.ema_alpha)
                         state["train_loss_ema"] = self.train_loss_ema
 
                         # stability checks
@@ -375,11 +384,12 @@ class Trainer:
                 state['samples_per_s'] = epoch_samples / T_epoch
                 state['train_loss_raw'] = (sum_train_loss / sum_train_count) if sum_train_count else None
 
-                self.hooks.on_epoch_end(state)
-
                 # track best val acc
                 if state["val_acc"] is not None:
                     self.best_val_acc = max(self.best_val_acc, float(state["val_acc"]))
+                state["best_val_acc"] = None if self.best_val_acc == float("-inf") else float(self.best_val_acc)
+
+                self.hooks.on_epoch_end(state)
 
                 # update epoch bar
                 if self._progress_enabled:
@@ -470,10 +480,6 @@ class Trainer:
 
         state["val_loss"] = mean_loss
         state["val_acc"] = acc
-
-        best_so_far = max(self.best_val_acc, float(acc or float("-inf")))
-        self.best_val_acc = best_so_far
-        state['best_val_acc'] = float(self.best_val_acc)
 
         self.hooks.on_eval_end(state)
         self.model.train(True)
