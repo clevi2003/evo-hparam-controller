@@ -77,17 +77,15 @@ def _get_current_lr(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0].get("lr", 0.0))
 
 def _get_weight_decay(optimizer: torch.optim.Optimizer) -> float:
-    return float(optimizer.param_group_0.get("weight_decay", 0.0))
+    return float(optimizer.param_groups[0].get("weight_decay", 0.0))
 
 def _get_momentum(optimizer: torch.optim.Optimizer) -> float:
-    return float(optimizer.param_group_0.get("momentum"), 0.0)
+    return float(optimizer.param_groups[0].get("momentum", 0.0))
 
 def _get_betas(optimizer: torch.optim.Optimizer) -> float:
-    betas = optimizer.param_group_0.get("betas", None)
-    return (float(betas[0]), float(betas))
+    betas = optimizer.param_groups[0].get("betas", None)
+    return (float(betas[0]), float(betas[1])) if betas else (None, None)
             
-
-
 class Trainer:
     """
     hook driven training engine with tqdm progress bars
@@ -295,7 +293,6 @@ class Trainer:
                         state["grad_norm"] = grad_norm
 
                         # momentum, b1, b2, weight decay
-                        # this is based on the way lr was being reported, I think this is correct but double check.
                         state["momentum"] = _get_momentum(self.optimizer)
                         state["weight_decay"] = _get_weight_decay(self.optimizer)
 
@@ -307,7 +304,7 @@ class Trainer:
                         # raw loss
                         if loss_scalar is not None:
                             batch_size = int(targets.size(0))
-                            sum_train_loss += float(loss_scalar) * batch_size # weight by batch_size to account for inconsistency
+                            sum_train_loss += float(loss_scalar) * batch_size
                             sum_train_count += batch_size
                         state["train_loss_raw"] = (sum_train_loss / sum_train_count) if sum_train_count else None
 
