@@ -172,8 +172,8 @@ class Trainer:
             "val_loss": None,
             "val_acc": None,
             "best_val_acc": None,
-            "t_train": None,
-            "epoch_avg_t": None,
+            "T_train": None,
+            "epoch_avg_T": None,
             "samples_per_s": None,
             "lr": _get_current_lr(self.optimizer),
             "grad_norm": None,
@@ -209,7 +209,6 @@ class Trainer:
                 # per epoch logging
                 T_epoch_start = time.perf_counter()
                 epoch_samples = 0
-                grad_clips_per_epoch = 0
                 nan_inf_flag = 0
 
                 # training epoch
@@ -254,6 +253,7 @@ class Trainer:
 
                         # backward
                         self.optimizer.zero_grad(set_to_none=True)
+                        
 
                         if self.mixed_precision:
                             self.scaler.scale(loss).backward()
@@ -268,7 +268,19 @@ class Trainer:
                             loss.backward()
                             self.hooks.on_after_backward(state)
                             self.hooks.on_before_optimizer_step(state)
+
+                            with torch.no_grad():
+                                before = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
+
                             self.optimizer.step()
+
+                            with torch.no_grad():
+                                after = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
+                                delta = after - before
+                                ratio = (delta.norm(2) / (before.norm(2) + 1e-12)).item()
+                                self.update_ratio_ema = 0.9 * getattr(self, "update_ratio_ema", ratio) + 0.1 * ratio
+                            state["update_ratio"] = ratio
+                            state["update_ratio_ema"] = self.update_ratio_ema
                             self.hooks.on_after_optimizer_step(state)
 
                         # update counters and collect metrics
@@ -299,7 +311,6 @@ class Trainer:
                         betas = _get_betas(self.optimizer)
                         state["beta1"] = betas[0]
                         state["beta2"] = betas[1]
-
 
                         # raw loss
                         if loss_scalar is not None:
@@ -363,7 +374,6 @@ class Trainer:
                 state['T_epoch'] = T_epoch
                 state['samples_per_s'] = epoch_samples / T_epoch
                 state['train_loss_raw'] = (sum_train_loss / sum_train_count) if sum_train_count else None
-                state['grad_clips_per_epoch'] = int(grad_clips_per_epoch)
 
                 self.hooks.on_epoch_end(state)
 
@@ -392,8 +402,8 @@ class Trainer:
         total_T_epoch = sum(t for s, t in epoch_data)
         
         # logging
-        state['t_train']             = T_train
-        state['epoch_avg_t']         = (total_T_epoch / len(epoch_data)) if len(epoch_data) > 0 else None
+        state['T_train']             = T_train
+        state['epoch_avg_T']         = (total_T_epoch / len(epoch_data)) if len(epoch_data) > 0 else None
         state['samples_per_s']       = (total_samples / T_train) if T_train > 0 else None
         state['best_val_acc']        = float(self.best_val_acc if self.best_val_acc != float("-inf") else (state.get("val_acc") or 0.0))
         state['divergence_count']    = int(self.divergence_count)

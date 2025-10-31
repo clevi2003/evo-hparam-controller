@@ -55,6 +55,7 @@ class _TrainMetricsHook(Hook):
     """
     def __init__(self, writer_like: Any, log_interval: int = 100) -> None:
         super().__init__() if hasattr(super(), "__init__") else None
+        self._writer_like = writer_like
         self._write_row = _as_row_writer(writer_like)
         self.log_interval = max(1, int(log_interval))
 
@@ -73,19 +74,20 @@ class _TrainMetricsHook(Hook):
                 "lr": _to_float(state.get("lr")),
                 "grad_norm": _to_float(state.get("grad_norm")),
                 "clip": int(bool(state.get("clip", False))),
+                "update_ratio": _to_float(state.get("update_ratio")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema")),
             }
             self._write_row(row)
         except Exception:
-            # never interrupt training for logging errors
             pass
 
     def on_epoch_end(self, state: Dict[str, Any]) -> None:
-        # flush at epoch boundaries for better durability
         try:
-            _flush_if_possible(self._write_row)
             row = {
                 "event": "epoch_end",
-                "nan_inf_flag": int(state.get('nan_inf_flag')),
+                "epoch": int(state.get("epoch", 0)),
+                "global_step": int(state.get("global_step", 0)),
+                "nan_inf_flag": int(state.get("nan_inf_flag", 0)),
                 "lr": _to_float(state.get("lr")),
                 "grad_norm": _to_float(state.get("grad_norm")),
                 "momentum": _to_float(state.get("momentum")),
@@ -93,23 +95,23 @@ class _TrainMetricsHook(Hook):
                 "beta2": _to_float(state.get("beta2")),
                 "weight_decay": _to_float(state.get("weight_decay")),
                 "clip": int(bool(state.get("clip", False))),
-                "acc": _to_float(state.get("acc")),
+                "update_ratio": _to_float(state.get("update_ratio")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema")),
+                "acc": _to_float(state.get("epoch_train_acc")),
                 "loss": _to_float(state.get("loss")),
-                "t_epoch": _to_float(state.get("t_epoch")),
+                "T_epoch": _to_float(state.get("T_epoch")),
                 "samples_per_s": _to_float(state.get("samples_per_s")),
                 "train_loss_raw": _to_float(state.get("train_loss_raw")),
                 "train_loss_ema": _to_float(state.get("train_loss_ema")),
             }
-
             self._write_row(row)
-            print(f"End of epoch {row.get('epoch', '?')}: {row}")
-            
-        except Exception:
+            # _flush_if_possible(self._writer_like)
+        except Exception as e:
+            print("TrainMetricsHook.on_epoch_end error:", repr(e), file=sys.stderr)
             pass
 
     def on_train_end(self, state: Dict[str, Any]) -> None:
         try:
-            _flush_if_possible(self._write_row)
             row = {
                 "event": "train_end",
                 
@@ -125,29 +127,28 @@ class _TrainMetricsHook(Hook):
                 "beta1": _to_float(state.get("beta1")),
                 "beta2": _to_float(state.get("beta2")),
                 "weight_decay": _to_float(state.get("weight_decay")),
-                "clip": int(bool(state.get("clip", False))),
 
                 # throughput
-                "t_train": _to_float(state.get("t_train")),
-                "t_per_epoch": _to_float(state.get("epoch_avg_t")),
+                "T_train": _to_float(state.get("T_train")),
+                "T_per_epoch": _to_float(state.get("epoch_avg_T")),
                 "samples_per_s": _to_float(state.get("samples_per_s")),
                 # <TODO: FLOPS>
 
                 # stability
                 "divergence_count": int(state.get("divergence_count", 0)),
                 "early_stop_reasons": state.get("early_stop_reasons", None),
+                "update_ratio": _to_float(state.get("update_ratio")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema")),
             }
             self._write_row(row)
-            print(f"Final training stats: {row}")
         except Exception as e:
-            try:
-                print("TrainMetricsHook on_train_end error:", e, file=sys.stderr)
-            except Exception:
-                pass
+            print("TrainMetricsHook.on_train_end error:", repr(e), file=sys.stderr)
+            pass
 
     def close(self) -> None:
         try:
-            _flush_if_possible(self._write_row)
+            _flush_if_possible(self._writer_like)
+            pass
         except Exception:
             pass
 
@@ -160,6 +161,7 @@ class _ValMetricsHook(Hook):
     """
     def __init__(self, writer_like: Any) -> None:
         super().__init__() if hasattr(super(), "__init__") else None
+        self._writer_like = writer_like
         self._write_row = _as_row_writer(writer_like)
 
     def on_eval_end(self, state: Dict[str, Any]) -> None:
@@ -178,13 +180,13 @@ class _ValMetricsHook(Hook):
 
     def on_epoch_end(self, state: Dict[str, Any]) -> None:
         try:
-            _flush_if_possible(self._write_row)
+            _flush_if_possible(self._writer_like)
         except Exception:
             pass
 
     def close(self) -> None:
         try:
-            _flush_if_possible(self._write_row)
+            _flush_if_possible(self._writer_like)
         except Exception:
             pass
 
