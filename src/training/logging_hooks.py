@@ -51,7 +51,7 @@ class _TrainMetricsHook(Hook):
     """
     logs per batch training metrics every interval steps into the given writer
     expected keys in state on on_batch_end:
-      epoch, global_step, batch_idx, loss, acc, lr, grad_norm
+        epoch, global_step, batch_idx, loss, acc, lr, grad_norm, clip
     """
     def __init__(self, writer_like: Any, log_interval: int = 100) -> None:
         super().__init__() if hasattr(super(), "__init__") else None
@@ -72,6 +72,7 @@ class _TrainMetricsHook(Hook):
                 "acc": _to_float(state.get("acc")),
                 "lr": _to_float(state.get("lr")),
                 "grad_norm": _to_float(state.get("grad_norm")),
+                "clip": int(bool(state.get("clip", False))),
             }
             self._write_row(row)
         except Exception:

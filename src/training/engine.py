@@ -262,8 +262,6 @@ class Trainer:
                             self.optimizer.step()
                             self.hooks.on_after_optimizer_step(state)
 
-                        # TODO gradient clipping
-
                         # update counters and collect metrics
                         self.global_step += 1
                         state["global_step"] = self.global_step
