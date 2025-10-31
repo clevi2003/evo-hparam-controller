@@ -22,6 +22,7 @@ from src.core.logging.loggers import make_evo_candidates_logger,make_gen_summary
 from src.evolution.eval_helpers import compose_candidate_row, compose_gen_summary_row, describe_candidate
 from src.training.checkpoints import CheckpointIO
 from src.evolution.fitness import FitnessWeights
+from src.core.logging.logging_parquet import close_all_parquet_writers
 from tqdm import tqdm
 
 
@@ -140,6 +141,11 @@ def run(args: argparse.Namespace) -> None:
     best_genome: Optional[Genome] = None
     t_start = time.time()
     disable_tqdm = getattr(args, "no_tqdm", False) or not sys.stdout.isatty()
+    total_epochs = generations * cand_count * int(getattr(evo_cfg.budget, "epochs", 1))
+    print(f"Total Epochs: {total_epochs}")
+    print("Generations:", generations)
+    print("Candidates per Generation:", cand_count)
+    print("epochs per Candidate:", int(getattr(evo_cfg.budget, "epochs", 1)))
 
     try:
         gen_pbar = tqdm(range(generations), total=generations, desc="Generations", dynamic_ncols=True, disable=disable_tqdm, position=0)
@@ -281,6 +287,9 @@ def run(args: argparse.Namespace) -> None:
                     "mode": "evolve",
                     "exp_name": getattr(train_cfg, "exp_name", getattr(evo_cfg, "exp_name", "")) or "",
                     "run_id": run_context.run_id,
+                    "population_size": int(len(genomes)),
+                    "mutation_sigma": float(sigma) if sigma is not None else None,
+                    "ga_mutation_rate": float(ga_mut_rate) if ga_mut_rate is not None else None,
                 })
                 evo_gen_logger.log(gen_row)
             except Exception:
@@ -310,6 +319,7 @@ def run(args: argparse.Namespace) -> None:
             evo_gen_logger.close()
         except Exception:
             pass
+        close_all_parquet_writers()
         run_context.finalize()
 
 def main():
@@ -318,7 +328,7 @@ def main():
     parser.add_argument("--controller-config", required=True, help="Path to controller YAML")
     parser.add_argument("--evolve-config", required=True, help="Path to evolve YAML")
     parser.add_argument("--outdir", required=True, help="Output directory for run artifacts/checkpoints")
-    parser.add_argument("--generations", type=int, default=10, help="Number of generations (fallback if not in YAML)")
+    parser.add_argument("--generations", type=int, default=None, help="Number of generations (fallback if not in YAML)")
     parser.add_argument("--no-artifacts", action="store_true", help="Disable per-candidate Parquet artifacts to speed up search")
     parser.add_argument("--no-tqdm", action="store_false", help="Disable tqdm progress bars")
     args = parser.parse_args()

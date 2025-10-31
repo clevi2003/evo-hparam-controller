@@ -221,13 +221,49 @@ class ControllerTickLogger:
 
 TRAIN_SCHEMA = pa.schema(
     COMMON_ID_FIELDS + [
+        # ids
+        pa.field("event", pa.string()),
         pa.field("global_step", pa.int64()),
         pa.field("epoch", pa.int64()),
+        pa.field("batch_idx", pa.int64()),
+
+        # core metrics
         pa.field("loss", pa.float32()),
         pa.field("acc", pa.float32()),
         pa.field("lr", pa.float32()),
         pa.field("grad_norm", pa.float32()),
-    ])
+        pa.field("grad_norm_ema", pa.float32()),
+
+        # optimizer params
+        pa.field("momentum", pa.float32()),
+        pa.field("beta1", pa.float32()),
+        pa.field("beta2", pa.float32()),
+        pa.field("weight_decay", pa.float32()),
+
+        # stability
+        pa.field("nan_inf_flag", pa.int64()),
+        pa.field("divergence_count", pa.int64()),
+        pa.field("early_stop_reasons", pa.list_(pa.string())),
+        pa.field("update_ratio", pa.float32()),
+        pa.field("update_ratio_ema", pa.float32()),
+        pa.field("clip", pa.int64()),
+
+        # throughput
+        pa.field("T_epoch", pa.float32()),
+        pa.field("T_train", pa.float32()),
+        pa.field("T_avg_epoch", pa.float32()),
+        pa.field("samples_per_s", pa.float32()),
+
+        # losses
+        pa.field("train_loss_raw", pa.float32()),
+        pa.field("train_loss_ema", pa.float32()),
+
+        # results
+        pa.field("best_val_acc", pa.float32()),
+        pa.field("final_val_acc", pa.float32()),
+        pa.field("final_train_acc", pa.float32()),
+    ]
+)
 
 VAL_SCHEMA = pa.schema(
     COMMON_ID_FIELDS + [
@@ -336,6 +372,8 @@ class _SimpleLogger:
         self._app.append(row)
     def close(self) -> None:
         self._app.close()
+    def flush(self):
+        self._app.flush()
 
 class ContextLogger:
     """
@@ -352,6 +390,8 @@ class ContextLogger:
         self._base.close()
     def set_static(self, **kwargs: Any) -> None:
         self._static.update(kwargs)
+    def flush(self):
+        self._base.flush()
 
 class ContextTickLogger:
     """
@@ -375,3 +415,6 @@ class ContextTickLogger:
 
     def set_static(self, **kwargs: Any) -> None:
         self._static.update(kwargs)
+
+    def flush(self):
+        self._base.flush()

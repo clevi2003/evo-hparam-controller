@@ -1,6 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
+import json
+
+import sys
 
 from pathlib import Path
 from src.core.hooks.hook_base import Hook
@@ -28,6 +31,7 @@ def _as_row_writer(writer_like: Any) -> Callable[[Dict[str, Any]], None]:
     )
 
 
+# TODO make sure this works, I was having difficulties when directly using the writer_like object - Zack
 def _flush_if_possible(writer_like: Any) -> None:
     for name in ("flush", "close"):
         fn = getattr(writer_like, name, None)
@@ -49,7 +53,7 @@ class _TrainMetricsHook(Hook):
     """
     logs per batch training metrics every interval steps into the given writer
     expected keys in state on on_batch_end:
-      epoch, global_step, batch_idx, loss, acc, lr, grad_norm
+        epoch, global_step, batch_idx, loss, acc, lr, grad_norm, clip
     """
     def __init__(self, writer_like: Any, log_interval: int = 100) -> None:
         super().__init__() if hasattr(super(), "__init__") else None
@@ -70,22 +74,95 @@ class _TrainMetricsHook(Hook):
                 "acc": _to_float(state.get("acc")),
                 "lr": _to_float(state.get("lr")),
                 "grad_norm": _to_float(state.get("grad_norm")),
+                "clip": int(bool(state.get("clip", False))),
+                "update_ratio": _to_float(state.get("update_ratio")),
+                "train_loss_ema": _to_float(state.get("train_loss_ema_step")),
+                "grad_norm_ema": _to_float(state.get("grad_norm_ema_step")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema_step")),
+                "momentum": _to_float(state.get("momentum")),
+                "beta1": _to_float(state.get("beta1")),
+                "beta2": _to_float(state.get("beta2")),
+                "weight_decay": _to_float(state.get("weight_decay")),
             }
+            # print(f'\n{row}\n')
             self._write_row(row)
         except Exception:
-            # never interrupt training for logging errors
             pass
 
     def on_epoch_end(self, state: Dict[str, Any]) -> None:
-        # flush at epoch boundaries for better durability
         try:
+            row = {
+                "event": "epoch_end",
+                "epoch": int(state.get("epoch", 0)),
+                "global_step": int(state.get("global_step", 0)),
+                "best_val_acc": _to_float(state.get('best_val_acc')),
+                "nan_inf_flag": int(state.get("nan_inf_flag", 0)),
+                "lr": _to_float(state.get("lr")),
+                "grad_norm": _to_float(state.get("grad_norm")),
+                "momentum": _to_float(state.get("momentum")),
+                "beta1": _to_float(state.get("beta1")),
+                "beta2": _to_float(state.get("beta2")),
+                "weight_decay": _to_float(state.get("weight_decay")),
+                "update_ratio": _to_float(state.get("update_ratio")),
+                "acc": _to_float(state.get("acc")),
+                "loss": _to_float(state.get("loss")),
+                "T_epoch": _to_float(state.get("T_epoch")),
+                "samples_per_s": _to_float(state.get("samples_per_s")),
+                "train_loss_raw": _to_float(state.get("train_loss_raw")),
+                "train_loss_ema": _to_float(state.get("train_loss_ema_epoch")),
+                "grad_norm_ema": _to_float(state.get("grad_norm_ema_epoch")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema_epoch")),
+            }
+            # print(f'\n{row}\n')
+            self._write_row(row)
             _flush_if_possible(self._write_row)
-        except Exception:
+        except Exception as e:
+            print("TrainMetricsHook.on_epoch_end error:", repr(e), file=sys.stderr)
+            pass
+
+    def on_train_end(self, state: Dict[str, Any]) -> None:
+        try:
+            row = {
+                "event": "train_end",
+                
+                # end results
+                "best_val_acc": _to_float(state.get('best_val_acc')),
+                "final_val_acc": _to_float(state.get("val_acc")),
+                "final_train_acc": _to_float(state.get("acc")),
+                "lr": _to_float(state.get("lr")),
+                "grad_norm": _to_float(state.get("grad_norm")),
+                "final_train_acc": float(state.get("acc") or 0.0),
+                "momentum": _to_float(state.get("momentum")),
+                "beta1": _to_float(state.get("beta1")),
+                "beta2": _to_float(state.get("beta2")),
+                "weight_decay": _to_float(state.get("weight_decay")),
+                "train_loss_raw": _to_float(state.get("train_loss_raw")),
+                "train_loss_ema": _to_float(state.get("train_loss_ema_epoch")),
+                "grad_norm_ema": _to_float(state.get("grad_norm_ema_epoch")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema_epoch")),
+
+                # throughput
+                "T_train": _to_float(state.get("T_train")),
+                "T_avg_epoch": _to_float(state.get("epoch_avg_T")),
+                "samples_per_s": _to_float(state.get("samples_per_s")),
+                # <TODO: FLOPS>
+
+                # stability
+                "divergence_count": int(state.get("divergence_count", 0)),
+                "early_stop_reasons": state.get("early_stop_reasons", None),
+                "update_ratio": _to_float(state.get("update_ratio")),
+                "update_ratio_ema": _to_float(state.get("update_ratio_ema")),
+            }
+            # print(f'\n{row}\n')
+            self._write_row(row)
+        except Exception as e:
+            print("TrainMetricsHook.on_train_end error:", repr(e), file=sys.stderr)
             pass
 
     def close(self) -> None:
         try:
             _flush_if_possible(self._write_row)
+            pass
         except Exception:
             pass
 
@@ -108,6 +185,7 @@ class _ValMetricsHook(Hook):
                 "global_step": int(state.get("global_step", 0)),
                 "val_loss": _to_float(state.get("val_loss")),
                 "val_acc": _to_float(state.get("val_acc")),
+                "best_val_acc": _to_float(state.get("best_val_acc")),
             }
             self._write_row(row)
         except Exception:

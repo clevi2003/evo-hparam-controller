@@ -47,11 +47,23 @@ class HookList(Hook):
     def on_epoch_start(self, state: State) -> None:
         self._call_each("on_epoch_start", state)
 
+    def on_epoch_end(self, state: State) -> None:
+        self._call_each("on_epoch_end", state)
+
     def on_batch_start(self, state: State) -> None:
         self._call_each("on_batch_start", state)
 
     def on_batch_end(self, state: State) -> None:
         self._call_each("on_batch_end", state)
+
+    def on_after_backward(self, state: State) -> None:
+        self._call_each("on_after_backward", state)
+
+    def on_before_optimizer_step(self, state: State) -> None:
+        self._call_each("on_before_optimizer_step", state)
+
+    def on_after_optimizer_step(self, state: State) -> None:
+        self._call_each("on_after_optimizer_step", state)
 
     def on_eval_start(self, state: State) -> None:
         self._call_each("on_eval_start", state)
