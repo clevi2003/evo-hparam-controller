@@ -328,3 +328,57 @@ def make_train_logger(path: Union[str, Path]) -> Logger:
 
 def make_val_logger(path: Union[str, Path]) -> Logger:
     return Logger(ParquetAppender(path, schema=VAL_SCHEMA, buffer_rows=1024))
+
+class _SimpleLogger:
+    def __init__(self, appender: ParquetAppender) -> None:
+        self._app = appender
+    def log(self, row: Dict[str, Any]) -> None:
+        self._app.append(row)
+    def close(self) -> None:
+        self._app.close()
+    def flush(self):
+        self._app.flush()
+
+class ContextLogger:
+    """
+    Wraps any logger-like (with .log(row)) and injects static fields into each row.
+    """
+    def __init__(self, base_logger: _SimpleLogger, static_fields: Optional[Dict[str, Any]] = None) -> None:
+        self._base = base_logger
+        self._static = dict(static_fields or {})
+    def log(self, row: Dict[str, Any]) -> None:
+        merged = self._static.copy()
+        merged.update(row)
+        self._base.log(merged)
+    def close(self) -> None:
+        self._base.close()
+    def set_static(self, **kwargs: Any) -> None:
+        self._static.update(kwargs)
+    def flush(self):
+        self._base.flush()
+
+class ContextTickLogger:
+    """
+    wraps a ControllerTickLogger and injects static fields but preserves the .log_tick API.
+    """
+    def __init__(self, tick_logger: ControllerTickLogger, static_fields: Optional[Dict[str, Any]] = None) -> None:
+        self._base = tick_logger
+        self._static = dict(static_fields or {})
+
+    def log_tick(self, row: Dict[str, Any]) -> None:
+        merged = self._static.copy()
+        merged.update(row or {})
+        self._base.log_tick(merged)
+
+    # For completeness; not used by runtime but harmless
+    def log(self, row: Dict[str, Any]) -> None:
+        self.log_tick(row)
+
+    def close(self) -> None:
+        self._base.close()
+
+    def set_static(self, **kwargs: Any) -> None:
+        self._static.update(kwargs)
+
+    def flush(self):
+        self._base.flush()

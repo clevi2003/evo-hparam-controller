@@ -7,41 +7,33 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
-# hooks and training engine
-from src.core.hooks.hook_base import Hook
-from src.core.hooks.hook_composition import HookList
-from src.core.hooks.common_hooks import LambdaHook
-from src.utils.seed_device import get_device, seed_everything
-from src.training.engine import Trainer
-
+from src.controller.controller import ControllerMLP
 # controller
 from src.controller.features import FeatureExtractor
 from src.controller.lr_scheduler import LrControllerScheduler
 from src.controller.runtime import ControllerRuntime, RuntimeConfig
+from src.controller.serialization import controller_version_hash_from_vector
 from src.controller.serialization import unflatten_params
-from src.controller.controller import ControllerMLP
-
+from src.core.hooks.common_hooks import LambdaHook
+# hooks and training engine
+from src.core.hooks.hook_base import Hook
+from src.core.hooks.hook_composition import HookList
 # logging and fitness
 from src.core.logging.loggers import (
     ControllerTickLogger,
     make_train_parquet_logger,
     make_val_parquet_logger,
+    ContextLogger,
 )
-from src.evolution.fitness import RunSummary, score_run, FitnessWeights, auc
-from src.training.checkpoints import CheckpointIO
 from src.data_.cifar10 import get_dataloaders
+from src.evolution.fitness import RunSummary, score_run, FitnessWeights, auc
 from src.models.resnet_cifar10 import resnet20
+from src.training.checkpoints import CheckpointIO
+from src.training.engine import Trainer
+from src.utils.seed_device import get_device, seed_everything
 from src.training.optim_sched_factory import build_optimizer, build_baseline_scheduler
-
-
-class _BaseSchedulerStepHook(Hook):
-    """step the base LR schedule each batch before the controller applies its action"""
-    def __init__(self, ctrl_scheduler: LrControllerScheduler) -> None:
-        self.ctrl_scheduler = ctrl_scheduler
-    def on_batch_end(self, state: Dict[str, Any]) -> None:
-        self.ctrl_scheduler.step_base()
 
 
 class _CollectEvalPointsHook(Hook):
@@ -80,51 +72,6 @@ class _DivergenceGuardHook(Hook):
             state["diverged"] = True
 
 
-def _default_build_cifar10_dataloaders(
-    data_root: str | Path,
-    batch_size: int,
-    num_workers: int,
-    subset_pct: float,
-    seed: int,
-) -> Tuple[DataLoader, DataLoader]:
-    try:
-        import torchvision
-        from torchvision import transforms
-    except Exception as e:
-        raise RuntimeError(
-            "Default CIFAR-10 data builder requires torchvision. "
-            "Install torchvision or provide a custom builder."
-        ) from e
-
-    tf_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-    ])
-    tf_test = transforms.Compose([transforms.ToTensor()])
-
-    train_set = torchvision.datasets.CIFAR10(root=str(data_root), train=True,  download=True, transform=tf_train)
-    test_set  = torchvision.datasets.CIFAR10(root=str(data_root), train=False, download=True, transform=tf_test)
-
-    if subset_pct < 1.0:
-        total = len(train_set)
-        keep = max(1, int(total * subset_pct))
-        g = torch.Generator().manual_seed(seed)
-        idx = torch.randperm(total, generator=g)[:keep]
-        train_set = Subset(train_set, idx.tolist())
-
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True)
-    val_loader   = DataLoader(test_set,  batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    return train_loader, val_loader
-
-
-def _default_build_cifar_model() -> torch.nn.Module:
-    try:
-        return resnet20()
-    except Exception as e:
-        raise RuntimeError("Could not build CIFAR-10 model (resnet20).") from e
-
-
 @dataclass
 class EvaluatorConfig:
     model_builder: Optional[Callable[[str, int], torch.nn.Module]] = None
@@ -136,8 +83,9 @@ class EvaluatorConfig:
     write_train_val_logs: bool = True
     checkpoint_io: Optional[CheckpointIO] = None
 
-    # allow injecting/overriding fitness weighting
+    # inject fitness weights & static IDs to be stamped on parquet rows
     fitness_weights: Optional[FitnessWeights] = None
+    static_ids: Optional[Dict[str, Any]] = None  # set per-candidate from runner
 
 
 @dataclass
@@ -182,32 +130,32 @@ class TruncatedTrainingEvaluator:
         self.budget_cfg = budget_cfg
         self.device = get_device(getattr(train_cfg, "device", None))
         print("DEVICE:", self.device)
-        self.evaluator_cfg = evaluator_cfg
         self.cfg = evaluator_cfg or EvaluatorConfig()
 
         # builders
-        self._model_builder = self.cfg.model_builder or (lambda arch, nc: _default_build_cifar_model())
+        self._model_builder = self.cfg.model_builder or (lambda arch, nc: resnet20())
         self._data_builder = self.cfg.dataloaders_builder or (
-            lambda root, bs, nw, pct, seed: _default_build_cifar10_dataloaders(root, bs, nw, pct, seed))
+            lambda root, bs, nw, pct, seed: get_dataloaders(root=root, batch_size=bs, num_workers=nw, augment=True)
+        )
 
         # optional output dir for Parquet logs
         self.out_dir = Path(self.cfg.out_dir) if self.cfg.out_dir else None
         if self.out_dir:
             self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        # fitness weights (defaults to AUC primary with small LR-volatility penalty and NaN penalty)
+        # fitness weights defaults
         self.fitness_weights: FitnessWeights = self.cfg.fitness_weights or FitnessWeights(
             primary="auc_val_acc",
             lr_volatility_weight=0.1,
             nan_penalty=100.0,
         )
 
-    def evaluate_result(self, candidate: Any) -> EvalResult:
-        raw = self.evaluate(candidate)
+    def evaluate_result(self, candidate: Any, static_ids: Optional[Dict[str, Any]] = None) -> EvalResult:
+        raw = self.evaluate(candidate, static_ids=static_ids)
         if isinstance(raw, EvalResult):
-            res = raw
+            return raw
         elif isinstance(raw, dict):
-            res = EvalResult(
+            return EvalResult(
                 fitness_primary=float(raw.get("fitness", raw.get("fitness_primary", 0.0))),
                 primary_metric=str(raw.get("primary_metric", self.fitness_weights.primary)),
                 fitness_vector=list(raw.get("fitness_vector", [])) if raw.get("fitness_vector") is not None else [],
@@ -218,33 +166,17 @@ class TruncatedTrainingEvaluator:
                 artifacts=dict(raw.get("artifacts", {})) if raw.get("artifacts") else {},
             )
         else:
-            # scalar fallback
             try:
                 fitness_val = float(raw)
             except Exception:
                 fitness_val = 0.0
-            res = EvalResult(fitness_primary=fitness_val, primary_metric=self.fitness_weights.primary)
+            return EvalResult(fitness_primary=fitness_val, primary_metric=self.fitness_weights.primary)
 
-        # optional truncated checkpoint artifact
-        ckpt = self.cfg.checkpoint_io
-        if ckpt is not None:
-            try:
-                vec = getattr(candidate, "vec", None)
-                if vec is not None:
-                    ckpt.save_warmup({"controller_vec": vec})
-            except Exception:
-                pass
-            rel = ckpt.save_final(model_state=None, optimizer_state=None, scheduler_state=None, extra={"mode": "truncated"})
-            res.artifacts = dict(res.artifacts or {})
-            res.artifacts["final"] = rel
-
-        return res
-
-    def evaluate(self, controller_vector: Any) -> Dict[str, Any]:
+    def evaluate(self, controller_vector: Any, static_ids: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         # deterministic budget for fair comparison across candidates
         seed_everything(self.budget_cfg.fixed_seed)
 
-        # data / model
+        # Data / Model
         train_loader, val_loader = get_dataloaders(
             root=self.train_cfg.data.data_root,
             batch_size=self.train_cfg.data.batch_size,
@@ -253,13 +185,10 @@ class TruncatedTrainingEvaluator:
         )
         model = resnet20().to(self.device)
 
-        # optimizer and base scheduler
+        # optimizer & base scheduler
         optimizer = build_optimizer(model, self.train_cfg.optim)
-
-        # derive steps_per_epoch for schedulers that need it
         steps_per_epoch = len(train_loader) if hasattr(train_loader, "__len__") else 0
         epochs_for_sched = int(self.budget_cfg.epochs or 1)
-
         sched_handle = build_baseline_scheduler(
             optimizer=optimizer,
             sched_cfg=self.train_cfg.sched,
@@ -267,10 +196,10 @@ class TruncatedTrainingEvaluator:
             steps_per_epoch=steps_per_epoch,
             epochs=epochs_for_sched,
         )
-
-        base_scheduler = sched_handle.scheduler  # may be None
+        base_scheduler = sched_handle.scheduler
         step_when = sched_handle.step_when
 
+        # Controller vector -> tensor on device
         if isinstance(controller_vector, np.ndarray):
             controller_vector = torch.as_tensor(controller_vector, dtype=torch.float32, device=self.device).view(-1)
         elif isinstance(controller_vector, torch.Tensor):
@@ -301,15 +230,25 @@ class TruncatedTrainingEvaluator:
             lr_max=self.ctrl_cfg.action.lr_max,
         )
 
-        # optional Parquet writers
+        # parquet writers (wrapped to inject IDs)
+        # merge external static_ids with a computed controller_version from the vector.
+        version_tag = controller_version_hash_from_vector(controller_vector)
+        merged_ids: Dict[str, Any] = dict(self.cfg.static_ids or {})
+        merged_ids.update(static_ids or {})
+        merged_ids.setdefault("controller_version", version_tag)
+
         ticks_logger = None
         train_logger = None
         val_logger = None
         if self.out_dir and self.cfg.write_controller_ticks:
-            ticks_logger = self._make_tick_logger(self.out_dir / "controller_calls.parquet")
+            # use ContextTickLogger so runtime can call .log_tick(...)
+            from src.core.logging.loggers import ControllerTickLogger, ContextTickLogger
+            base_tick = ControllerTickLogger.to_parquet(self.out_dir / "controller_calls.parquet")
+            ticks_logger = ContextTickLogger(base_tick, static_fields=merged_ids)
         if self.out_dir and self.cfg.write_train_val_logs:
-            train_logger = make_train_parquet_logger(self.out_dir / "logs_train.parquet")
-            val_logger   = make_val_parquet_logger(self.out_dir / "logs_val.parquet")
+            from src.core.logging.loggers import make_train_parquet_logger, make_val_parquet_logger, ContextLogger
+            train_logger = ContextLogger(make_train_parquet_logger(self.out_dir / "logs_train.parquet"), merged_ids)
+            val_logger = ContextLogger(make_val_parquet_logger(self.out_dir / "logs_val.parquet"), merged_ids)
 
         runtime = ControllerRuntime(
             controller=controller,
@@ -335,19 +274,19 @@ class TruncatedTrainingEvaluator:
         action_stream: List[float] = []
 
         collectors = HookList([
-            # _BaseSchedulerStepHook(ctrl_scheduler), # step base on every batch (optional)
-            extractor,  # keep features updated
-            runtime,    # controller decisions
-            _CollectEvalPointsHook(val_curve),  # (step, val_acc)
-            _CollectActionDeltasHook(action_stream),  # delta log lr
-            _DivergenceGuardHook(),  # nan/inf guard
+            extractor,
+            runtime,
+            _CollectEvalPointsHook(val_curve),
+            _CollectActionDeltasHook(action_stream),
+            _DivergenceGuardHook(),
         ])
 
-        # train/val scalar parquet logging via hooks
+        # scalar parquet logging via hooks
         if (train_logger is not None) or (val_logger is not None):
             collectors.add(self._make_scalar_logging_hook(train_logger, val_logger))
 
         loss_fn = torch.nn.CrossEntropyLoss()
+
         trainer = Trainer(
             model=model,
             optimizer=optimizer,
@@ -365,15 +304,21 @@ class TruncatedTrainingEvaluator:
             cfg=self.train_cfg,
         )
 
-        # make sure parquet writers flush/close even if training crashes
+        # ensure parquet writers close even if training crashes
         try:
             summary = trainer.fit()
         finally:
             for w in (train_logger, val_logger, ticks_logger):
                 try:
                     if w is not None and hasattr(w, "close"):
+                        try:
+                            w.flush()
+                        except Exception as e:
+                            print("WARNING: failed to flush logger:\n", e)
+                            pass
                         w.close()
-                except Exception:
+                except Exception as e:
+                    print("WARNING: failed to close logger:\n", e)
                     pass
 
         final_val = float(summary.get("final_val_acc", 0.0))
@@ -388,26 +333,20 @@ class TruncatedTrainingEvaluator:
             total_epochs=int(summary.get("final_epoch", 0)),
         )
 
-        # compute the fitness score
+        # fitness
         fitness_score = score_run(run_summary, self.fitness_weights)
-        # extra snapshot metrics are for debugging / parquet
         auc_val = float(auc(val_curve)) if len(val_curve) >= 2 else 0.0
         lr_vol = float(np.std(action_stream)) if len(action_stream) >= 2 else 0.0
 
         return {
-            # what the outer evolution loop needs:
             "fitness": fitness_score,
             "fitness_primary": fitness_score,
             "primary_metric": self.fitness_weights.primary,
-
-            # for visibility / logging
             "summary": run_summary,
             "final_val_acc": run_summary.final_val_acc,
             "val_curve_points": len(run_summary.val_acc_curve),
             "num_actions": len(run_summary.action_deltas),
             "diverged": run_summary.diverged,
-
-            # snapshot for parquet/debug
             "metrics_snapshot": {
                 "auc_val_acc": auc_val,
                 "final_val_acc": run_summary.final_val_acc,
@@ -418,26 +357,7 @@ class TruncatedTrainingEvaluator:
             },
         }
 
-    def _peek_loader_len(self) -> int:
-        try:
-            train_loader, _ = self._data_builder(
-                self.train_cfg.data.data_root,
-                self.train_cfg.data.batch_size,
-                self.train_cfg.data.num_workers,
-                self.budget_cfg.fixed_subset_pct,
-                self.budget_cfg.fixed_seed,
-            )
-            return len(train_loader)
-        except Exception:
-            return 1000
-
-    def _make_tick_logger(self, path: Path) -> ControllerTickLogger:
-        return ControllerTickLogger.to_parquet(path)
-
     def _make_scalar_logging_hook(self, train_logger, val_logger) -> Hook:
-        """
-        emit small Parquet scalar logs during evolution runs
-        """
         def log_train(s: Dict[str, Any]) -> None:
             if train_logger is None:
                 return
@@ -450,7 +370,8 @@ class TruncatedTrainingEvaluator:
                     "lr":          float(s.get("lr", 0.0) or 0.0),
                     "grad_norm":   float(s.get("grad_norm", 0.0) or 0.0),
                 })
-            except Exception:
+            except Exception as e:
+                print("WARNING: failed to log train:\n", e)
                 pass
 
         def log_val(s: Dict[str, Any]) -> None:
@@ -463,7 +384,8 @@ class TruncatedTrainingEvaluator:
                     "val_loss":    float(s.get("val_loss", 0.0) or 0.0),
                     "val_acc":     float(s.get("val_acc", 0.0) or 0.0),
                 })
-            except Exception:
+            except Exception as e:
+                print("WARNING: failed to log val:\n", e)
                 pass
 
         return HookList([
