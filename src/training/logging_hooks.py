@@ -88,6 +88,11 @@ class _TrainMetricsHook(Hook):
                 "nan_inf_flag": int(state.get('nan_inf_flag')),
                 "lr": _to_float(state.get("lr")),
                 "grad_norm": _to_float(state.get("grad_norm")),
+                "momentum": _to_float(state.get("momentum")),
+                "beta1": _to_float(state.get("beta1")),
+                "beta2": _to_float(state.get("beta2")),
+                "weight_decay": _to_float(state.get("weight_decay")),
+                "clip": int(bool(state.get("clip", False))),
                 "acc": _to_float(state.get("acc")),
                 "loss": _to_float(state.get("loss")),
                 "t_epoch": _to_float(state.get("t_epoch")),
@@ -116,6 +121,11 @@ class _TrainMetricsHook(Hook):
                 "grad_norm": _to_float(state.get("grad_norm")),
                 "train_loss_raw": _to_float(state.get("train_loss_raw")),
                 "train_loss_ema": _to_float(state.get("train_loss_ema")),
+                "momentum": _to_float(state.get("momentum")),
+                "beta1": _to_float(state.get("beta1")),
+                "beta2": _to_float(state.get("beta2")),
+                "weight_decay": _to_float(state.get("weight_decay")),
+                "clip": int(bool(state.get("clip", False))),
 
                 # throughput
                 "t_train": _to_float(state.get("t_train")),

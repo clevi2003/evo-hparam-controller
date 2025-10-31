@@ -283,6 +283,46 @@ class Trainer:
                         state["lr"] = _get_current_lr(self.optimizer)
                         state["grad_norm"] = grad_norm
 
+                        # momentum, b1, b2, weight decay
+                        # this is based on the way lr was being reported, I think this is correct but double check.
+                        try:
+                            param_group_0 = self.optimizer.param_groups[0] if len(self.optimizer.param_groups) > 0 else {}
+                        except Exception:
+                            param_group_0 = {}
+
+                        # moment
+                        try:
+                            momentum = param_group_0.get("momentum", None)
+                            if  momentum is not None:
+                                state["momentum"] = momentum
+                            else:
+                                state["momentum"] = None
+                        except Exception:
+                            state["momentum"] = None
+
+                        # betas
+                        try:
+                            betas = param_group_0.get("betas", None)
+                            if betas is not None and isinstance(betas, (list, tuple)) and len(betas) >= 2:
+                                state["beta1"] = float(betas[0])
+                                state["beta2"] = float(betas[1])
+                            else:
+                                state["beta1"] = None
+                                state["beta2"] = None
+                        except Exception:
+                            state["beta1"] = None
+                            state["beta2"] = None
+
+                        # weight decay
+                        try:
+                            wd = param_group_0.get("weight_decay", None)
+                            if (wd is not None):
+                                state["weight_decay"] = float(wd)
+                            else:
+                                state["weight_decay"] = None
+                        except Exception:
+                            state["weight_decay"] = None
+
                         # raw loss
                         if loss_scalar is not None:
                             batch_size = int(targets.size(0))
