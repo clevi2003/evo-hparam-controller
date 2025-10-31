@@ -71,13 +71,19 @@ def main():
     # hook that calls ckpt_io on eval end
     hooks.append(ckpt_io.make_checkpoint_hook())
 
-    hooks.append(
-        LambdaHook(
-            on_after_backward=lambda state: torch.nn.utils.clip_grad_norm_(
-                state.model.parameters(), max_norm=float(cfg.grad_clip_norm)
-            )
-        )
-    )
+    def _after_backward(state):
+        # gradient clipping
+        max_norm = cfg.grad_clip_norm
+        if max_norm is None:
+            state["clip"] = False
+            return
+        total_norm = torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=float(max_norm))
+        try:
+            state["clip"] = float(total_norm) > float(max_norm)
+        except Exception:
+            state["clip"] = bool(total_norm > max_norm)
+
+    hooks.append(LambdaHook(on_after_backward=_after_backward))
 
     # tb_hook = make_tb_hook_optional(cfg.log.dir_tb, run_ctx) # TODO if we want tensorboard
     # if tb_hook:
@@ -98,7 +104,6 @@ def main():
         epochs=cfg.epochs,
         max_steps=cfg.max_steps,
         mixed_precision=False,
-        #grad_clip=cfg.grad_clip_norm,
         metric_fn=None,
         cfg=cfg.to_dict(),
     )

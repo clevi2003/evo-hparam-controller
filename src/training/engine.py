@@ -4,6 +4,8 @@ import sys
 import torch
 from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
+import time
+import math
 
 MetricFn = Callable[[torch.Tensor, torch.Tensor], float]
 StepWhen = Literal["batch", "epoch", "disabled"]
@@ -68,11 +70,39 @@ def _compute_grad_norm(model: torch.nn.Module) -> Optional[float]:
         return None
     return float(total ** 0.5)
 
+def _compute_ema(new, ema, alpha):
+    if new is None:
+        return ema
+    a = float(alpha)
+    new = float(new)
+    return new if ema is None else (1.0 - a) * float(ema) + a * new
+
+
 
 def _get_current_lr(optimizer: torch.optim.Optimizer) -> float:
     # assume single param group for reporting; fine for CIFAR baselines
     return float(optimizer.param_groups[0].get("lr", 0.0))
 
+def _get_weight_decay(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0].get("weight_decay", 0.0))
+
+def _get_momentum(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0].get("momentum", 0.0))
+
+def _get_betas(optimizer: torch.optim.Optimizer) -> float:
+    betas = optimizer.param_groups[0].get("betas", None)
+    return (float(betas[0]), float(betas[1])) if betas else (None, None)
+            
+def _get_opt_hparams(optimizer):
+    base = getattr(optimizer, "base_optimizer", None) or getattr(optimizer, "optimizer", None)
+    if base is not None: optimizer = base
+    pg = optimizer.param_groups[0]
+    out = {}
+    if "weight_decay" in pg: out["weight_decay"] = float(pg["weight_decay"])
+    if "momentum" in pg:     out["momentum"]     = float(pg["momentum"])
+    if "betas" in pg and pg["betas"] is not None:
+        b0, b1 = pg["betas"]; out["beta1"], out["beta2"] = float(b0), float(b1)
+    return out
 
 class Trainer:
     """
@@ -117,23 +147,37 @@ class Trainer:
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.scheduler_step_when = scheduler_step_when
+        self.metric_fn = _default_accuracy_fn if metric_fn is None else metric_fn
         self.loss_fn = loss_fn
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
+        self.best_val_acc = float("-inf")
         self.epochs = int(epochs)
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.grad_clip = grad_clip
-        self.metric_fn = metric_fn
         self.mixed_precision = mixed_precision
         self.scaler = torch.cuda.amp.GradScaler(enabled=mixed_precision)
         self.hooks = hooks or NullHook()
         self.cfg = cfg
         self.global_step = 0
-        self.best_val_acc = float("-inf")
         # tqdm control
         # disable if no tty (non-interactive) or user asked to hide
         self._progress_enabled = bool(show_progress) and sys.stderr.isatty()
+        self.divergence_count = 0
+
+        # step EMAs (updated every batch)
+        self.ema_global_step_alpha = 0.03   # TODO add to config?
+        self.train_loss_ema_step = None
+        self.grad_norm_ema_step = None
+        self.update_ratio_ema_step = None
+
+        # epoch EMAs (updated once per epoch)
+        self.ema_epoch_alpha = 0.1          # TODO add to config?
+        self.train_loss_ema_epoch = None
+        self.grad_norm_ema_epoch = None
+        self.update_ratio_ema_epoch = None
+
 
     def fit(self, *, epochs: Optional[int] = None, max_steps: Optional[int] = None) -> Dict[str, float]:
         """
@@ -152,16 +196,35 @@ class Trainer:
             "device": self.device,
             "cfg": self.cfg,
             "model": self.model,
+            "grad_clip_norm": self.grad_clip,
             # live scalars
             "loss": None,
             "acc": None,
             "val_loss": None,
             "val_acc": None,
+            "T_train": None,
+            "epoch_avg_T": None,
+            "samples_per_s": None,
             "lr": _get_current_lr(self.optimizer),
             "grad_norm": None,
+            "nan_inf_flag": 0,
+            "divergence_count": 0,
+            "early_stop_reasons": [],
+            "T_epoch": 0.0,
+            "train_loss_raw": None,
+            "update_ratio": None,
+            "train_loss_ema_step": None,
+            "grad_norm_ema_step": None,
+            "update_ratio_ema_step": None,
+            "train_loss_ema_epoch": None,
+            "grad_norm_ema_epoch": None,
+            "update_ratio_ema_epoch": None,
         }
 
         self.hooks.on_train_start(state)
+
+        T_train_start = time.perf_counter()
+        epoch_data = []
 
         # epoch progress bar
         with _tqdm(
@@ -175,6 +238,15 @@ class Trainer:
                 state["epoch"] = epoch
                 self.hooks.on_epoch_start(state)
 
+                # sync for cuda timings
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+                # per epoch logging
+                T_epoch_start = time.perf_counter()
+                epoch_samples = 0
+                nan_inf_flag = 0
+
                 # training epoch
                 self.model.train(True)
 
@@ -185,12 +257,19 @@ class Trainer:
                 except Exception:
                     total_batches = None
 
+
                 with _tqdm(
                     total=total_batches,
                     desc=f"Train [{epoch+1}/{total_epochs}]",
                     leave=False,
                     disable=not self._progress_enabled,
                 ) as pbar_train:
+                    
+                    sum_train_loss, sum_train_count = 0.0, 0
+                    epoch_grad_norm_sum = 0.0
+                    epoch_grad_norm_n = 0
+                    epoch_update_ratio_sum = 0.0
+                    epoch_update_ratio_n = 0
 
                     for batch_idx, batch in enumerate(self.train_loader):
                         state["batch_idx"] = batch_idx
@@ -202,6 +281,9 @@ class Trainer:
                         inputs, targets = self._unpack_batch(batch)
                         inputs = inputs.to(self.device, non_blocking=True)
                         targets = targets.to(self.device, non_blocking=True)
+
+                        # keeping a running total of samples for the throughput
+                        epoch_samples += int(targets.size(0))
 
                         self.hooks.on_batch_start(state)
 
@@ -225,7 +307,17 @@ class Trainer:
                             loss.backward()
                             self.hooks.on_after_backward(state)
                             self.hooks.on_before_optimizer_step(state)
+
+                            with torch.no_grad():
+                                before = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
+
                             self.optimizer.step()
+
+                            with torch.no_grad():
+                                after = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
+                                delta = after - before
+                                ratio = (delta.norm(2) / (before.norm(2) + 1e-12)).item()
+                            state["update_ratio"] = ratio
                             self.hooks.on_after_optimizer_step(state)
 
                         # update counters and collect metrics
@@ -239,12 +331,61 @@ class Trainer:
                             except Exception:
                                 acc = None
 
+                        # grad norm
+                        grad_norm = _compute_grad_norm(self.model)
+                        loss_scalar = _detach_scalar(loss)
+
+                        # global step emas
+                        self.train_loss_ema_step = _compute_ema(
+                            loss_scalar, self.train_loss_ema_step, self.ema_global_step_alpha
+                        )
+                        self.grad_norm_ema_step = _compute_ema(
+                            grad_norm, self.grad_norm_ema_step, self.ema_global_step_alpha
+                        )
+                        if "update_ratio" in state and state["update_ratio"] is not None:
+                            self.update_ratio_ema_step = _compute_ema(
+                                state["update_ratio"], self.update_ratio_ema_step, self.ema_global_step_alpha
+                            )
+
+                        state["train_loss_ema_step"]   = self.train_loss_ema_step
+                        state["grad_norm_ema_step"]    = self.grad_norm_ema_step
+                        state["update_ratio_ema_step"] = self.update_ratio_ema_step
+
+                        if grad_norm is not None:
+                            epoch_grad_norm_sum += float(grad_norm)
+                            epoch_grad_norm_n += 1
+
+                        if "update_ratio" in state and state["update_ratio"] is not None:
+                            epoch_update_ratio_sum += float(state["update_ratio"])
+                            epoch_update_ratio_n += 1
+
                         state["logits"] = logits.detach()
                         state["targets"] = targets.detach()
-                        state["loss"] = _detach_scalar(loss)
+                        state["loss"] = loss_scalar
                         state["acc"] = acc
                         state["lr"] = _get_current_lr(self.optimizer)
-                        state["grad_norm"] = _compute_grad_norm(self.model)
+                        state["grad_norm"] = grad_norm
+
+                        # momentum, b1, b2, weight decay
+                        state["momentum"] = _get_momentum(self.optimizer)
+                        state["weight_decay"] = _get_weight_decay(self.optimizer)
+
+                        betas = _get_betas(self.optimizer)
+                        state["beta1"] = betas[0]
+                        state["beta2"] = betas[1]
+
+                        # raw loss
+                        if loss_scalar is not None:
+                            batch_size = int(targets.size(0))
+                            sum_train_loss += float(loss_scalar) * batch_size
+                            sum_train_count += batch_size
+                        state["train_loss_raw"] = (sum_train_loss / sum_train_count) if sum_train_count else None
+
+                        # stability checks
+                        if loss_scalar is None or not math.isfinite(loss_scalar):
+                            nan_inf_flag = 1
+                        if grad_norm is None or not (float("-inf") < float(grad_norm) < float("inf")):
+                            self.divergence_count += 1
 
                         # progress bar feedback
                         if self._progress_enabled:
@@ -254,6 +395,8 @@ class Trainer:
                                 lr=f"{state['lr']:.3e}",
                             )
                             pbar_train.update(1)
+
+                        state.update(_get_opt_hparams(self.optimizer))
 
                         self.hooks.on_batch_end(state)
 
@@ -265,6 +408,37 @@ class Trainer:
                         if budget_steps is not None and self.global_step >= budget_steps:
                             break
 
+                # Compute epoch means
+                epoch_loss_mean = (sum_train_loss / sum_train_count) if sum_train_count else None
+                epoch_grad_norm_mean = (epoch_grad_norm_sum / epoch_grad_norm_n) if epoch_grad_norm_n else None
+                epoch_update_ratio_mean = (epoch_update_ratio_sum / epoch_update_ratio_n) if epoch_update_ratio_n else None
+
+                # Update epoch EMAs
+                self.train_loss_ema_epoch = _compute_ema(
+                    epoch_loss_mean, self.train_loss_ema_epoch, self.ema_epoch_alpha
+                )
+                self.grad_norm_ema_epoch = _compute_ema(
+                    epoch_grad_norm_mean, self.grad_norm_ema_epoch, self.ema_epoch_alpha
+                )
+                self.update_ratio_ema_epoch = _compute_ema(
+                    epoch_update_ratio_mean, self.update_ratio_ema_epoch, self.ema_epoch_alpha
+                )
+
+                # Expose epoch EMAs on state for logging
+                state["train_loss_ema_epoch"] = self.train_loss_ema_epoch
+                state["grad_norm_ema_epoch"]  = self.grad_norm_ema_epoch
+                state["update_ratio_ema_epoch"] = self.update_ratio_ema_epoch
+
+                # sync for accurate cuda timings
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+                T_epoch_end = time.perf_counter()
+                T_epoch = T_epoch_end - T_epoch_start
+                
+                data = (epoch_samples, T_epoch)
+                epoch_data.append(data)
+
                 # validation once per epoch
                 if self.val_loader is not None:
                     self._run_validation(state, total_epochs, epoch)
@@ -273,11 +447,17 @@ class Trainer:
                 if self.scheduler is not None and self.scheduler_step_when == "epoch":
                     self.scheduler.step()
 
-                self.hooks.on_epoch_end(state)
+                state['nan_inf_flag'] = nan_inf_flag
+                state['T_epoch'] = T_epoch
+                state['samples_per_s'] = epoch_samples / T_epoch
+                state['train_loss_raw'] = (sum_train_loss / sum_train_count) if sum_train_count else None
 
                 # track best val acc
                 if state["val_acc"] is not None:
                     self.best_val_acc = max(self.best_val_acc, float(state["val_acc"]))
+                state["best_val_acc"] = None if self.best_val_acc == float("-inf") else float(self.best_val_acc)
+
+                self.hooks.on_epoch_end(state)
 
                 # update epoch bar
                 if self._progress_enabled:
@@ -289,13 +469,27 @@ class Trainer:
 
                 # early exit if budget maxed out
                 if budget_steps is not None and self.global_step >= budget_steps:
+                    state['early_stop_reasons'].append('budget maxed out')
                     break
-
+    
         # train end
+        T_train_end = time.perf_counter()
+        T_train = T_train_end - T_train_start
+
+        total_samples = sum(s for s, t in epoch_data)
+        total_T_epoch = sum(t for s, t in epoch_data)
+        
+        # logging
+        state['T_train']             = T_train
+        state['epoch_avg_T']         = (total_T_epoch / len(epoch_data)) if len(epoch_data) > 0 else None
+        state['samples_per_s']       = (total_samples / T_train) if T_train > 0 else None
+        state['best_val_acc']        = float(self.best_val_acc if self.best_val_acc != float("-inf") else (state.get("val_acc") or 0.0))
+        state['divergence_count']    = int(self.divergence_count)
+
         self.hooks.on_train_end(state)
 
         return {
-            "best_val_acc": float(self.best_val_acc if self.best_val_acc != float("-inf") else (state.get("val_acc") or 0.0)),
+            "best_val_acc": float(state.get('best_val_acc') or 0.0),
             "final_val_acc": float(state.get("val_acc") or 0.0),
             "final_train_acc": float(state.get("acc") or 0.0),
             "final_epoch": int(state.get("epoch", total_epochs - 1)),
