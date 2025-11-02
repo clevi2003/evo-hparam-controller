@@ -19,6 +19,10 @@ from src.training.engine import Trainer
 from src.data_.cifar10 import get_dataloaders
 from src.models.resnet_cifar10 import resnet20
 
+#import the ECE and NLL hook (Kevin)
+from src.core.ECE_and_NLL.ece_hook import ECEHook
+from  src.core.ECE_and_NLL.nll_hook import NLLHook
+
 def parse_args():
     p = argparse.ArgumentParser("Baseline trainer")
     p.add_argument("--config", required=True)
@@ -65,7 +69,13 @@ def main():
     # Hooks: logging and checkpoints
     hooks = []
     hooks.append(make_train_metrics_hook(io_ctx, cfg.log.log_interval))
+    #add ECE and NLL
+    n_bins = getattr(getattr(cfg, "ece", object()), "n_bins", 15) #default is 15 bins
+    hooks.append(ECEHook(device=device, n_bins=n_bins, write_nll=False))
+    hooks.append(NLLHook())
+    
     hooks.append(make_val_metrics_hook(io_ctx))
+    
 
     ckpt_io = CheckpointIO(run_ctx.run_dir / "checkpoints")
     # hook that calls ckpt_io on eval end
