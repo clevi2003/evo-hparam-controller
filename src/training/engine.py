@@ -525,6 +525,13 @@ class Trainer:
                 logits = self.model(inputs)
                 loss = self.loss_fn(logits, targets)
 
+                 # ---- ECE accumulator update  -----------------------------
+                acc_obj = state.get("_ece_acc", None)
+                if acc_obj is not None:
+                    # pass detached tensors; no storage of full logits/history
+                    acc_obj.update(logits.detach(), targets.detach())
+                # -----------------------------------------------------------------
+
                 total_loss += float(loss.item()) * targets.size(0)
 
                 if self.metric_fn is not None and logits.dim() >= 2:

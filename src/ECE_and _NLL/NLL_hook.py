@@ -3,13 +3,22 @@ from src.core.hooks.hook_base import Hook
 
 class NLLHook(Hook):
     """
-    Mirror val_loss into state['metrics']['nll'] at validation end.
-    Use this when val_loss is cross-entropy loss.
+    Mirror val_loss into state['metrics'][key] at validation end.
+    Assumes validation criterion is cross-entropy (so val_loss == average NLL).
     """
+    def __init__(self, key: str = "nll") -> None:
+        self.key = key
+
     def on_eval_end(self, state):
+        val_loss = state.get("val_loss", None)
+        if val_loss is None:
+            return  # nothing to mirror
+
         m = state.get("metrics", {}) or {}
-        m["nll"] = float(state.get("val_loss") or 0.0)
-        # keep core vals together for convenience
-        m.setdefault("val_loss", float(state.get("val_loss") or 0.0))
-        m.setdefault("val_acc",  float(state.get("val_acc")  or 0.0))
+        # don't clobber if something else already set it (e.g., another hook)
+        m.setdefault(self.key, float(val_loss))
+        # keep core vals together for convenience (only set if missing)
+        m.setdefault("val_loss", float(val_loss))
+        if state.get("val_acc") is not None:
+            m.setdefault("val_acc", float(state["val_acc"]))
         state["metrics"] = m
