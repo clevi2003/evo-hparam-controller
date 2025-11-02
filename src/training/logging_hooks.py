@@ -177,15 +177,20 @@ class _ValMetricsHook(Hook):
         super().__init__() if hasattr(super(), "__init__") else None
         self._write_row = _as_row_writer(writer_like)
 
+    #updated on_eval_end
     def on_eval_end(self, state: Dict[str, Any]) -> None:
         try:
+            m = state.get("metrics", {}) or {}
             row = {
-                "event": "val_epoch",
-                "epoch": int(state.get("epoch", 0)),
-                "global_step": int(state.get("global_step", 0)),
-                "val_loss": _to_float(state.get("val_loss")),
-                "val_acc": _to_float(state.get("val_acc")),
-                "best_val_acc": _to_float(state.get("best_val_acc")),
+            "event": "val_epoch",
+            "epoch": int(state.get("epoch", 0)),
+            "global_step": int(state.get("global_step", 0)),
+            "val_loss": float(state.get("val_loss") or 0.0),
+            "val_acc":  float(state.get("val_acc")  or 0.0),
+            "best_val_acc": float(state.get("best_val_acc") or 0.0),
+            # new:
+            "ece": float(m.get("ece") or 0.0),
+            "nll": float(m.get("nll") or (state.get("val_loss") or 0.0)),
             }
             self._write_row(row)
         except Exception:
