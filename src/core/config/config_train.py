@@ -61,6 +61,7 @@ class SchedCfg:
     gamma: float = 0.1
     milestones: List[int] = field(default_factory=list)
     t_max: Optional[int] = None  # cosine
+    pct_start: float = 0.1  # for OneCycle
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self, total_epochs: int) -> None:
@@ -69,6 +70,7 @@ class SchedCfg:
         _ensure_positive("sched.warmup_epochs", self.warmup_epochs, allow_zero=True)
         _ensure_positive("sched.step_size", self.step_size, allow_zero=True)
         _ensure_between("sched.gamma", self.gamma, 0.0, 1.0)
+        _ensure_between("sched.pct_start", self.pct_start, 0.0, 1.0)
         if self.t_max is not None:
             _ensure_positive("sched.t_max", self.t_max)
         # milestones can be empty or ascending ints

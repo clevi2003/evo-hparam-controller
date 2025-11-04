@@ -33,6 +33,6 @@ def get_dataloaders(root: str, batch_size: int, num_workers: int = 4, augment: b
     train_set = CIFAR10(root=root, train=True, download=True, transform=train_tf)
     test_set = CIFAR10(root=root, train=False, download=True, transform=test_tf)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
     return train_loader, test_loader
