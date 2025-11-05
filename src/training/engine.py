@@ -47,7 +47,6 @@ def _default_accuracy_fn(logits: torch.Tensor, targets: torch.Tensor) -> float:
     total = targets.numel()
     return float(correct / max(1, total))
 
-
 def _detach_scalar(x: torch.Tensor | float | int | None) -> Optional[float]:
     if x is None:
         return None
@@ -299,24 +298,21 @@ class Trainer:
                         self.optimizer.zero_grad(set_to_none=True)
                         if self.mixed_precision:
                             self.scaler.scale(loss).backward()
-                            self.scaler.unscale_(self.optimizer) 
+                            self.scaler.unscale_(self.optimizer)
                         else:
                             loss.backward()
 
-                        grad_norm = _grad_l2_norm(self.model)
-                        state["grad_norm"] = grad_norm
-
-                        if self.grad_clip is not None:
-                            grad_norm_before_clip = grad_norm
-                            _ = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-                            grad_norm_after_clip = _grad_l2_norm(self.model)  
-                            state["grad_norm_pre_clip"]  = grad_norm_before_clip
-                            state["grad_norm_post_clip"] = grad_norm_after_clip
+                        grad_norm_pre = _grad_l2_norm(self.model)
+                        state["grad_norm_pre_clip"] = grad_norm_pre
+                        self.hooks.on_after_backward(state)
+                        
+                        state["grad_norm_post_clip"] = state.get("grad_norm_post_clip", grad_norm_pre)
+                        state["grad_norm"] = state["grad_norm_post_clip"]
 
                         with torch.no_grad():
                             before = _p2v([p for p in self.model.parameters() if p.requires_grad])
 
-                        self.hooks.on_after_backward(state)
+                        # optimizer
                         self.hooks.on_before_optimizer_step(state)
 
                         if self.mixed_precision:
@@ -377,7 +373,7 @@ class Trainer:
                             loss_scalar, self.train_loss_ema_step, self.ema_global_step_alpha
                         )
                         self.grad_norm_ema_step = _compute_ema(
-                            grad_norm, self.grad_norm_ema_step, self.ema_global_step_alpha
+                            state["grad_norm"], self.grad_norm_ema_step, self.ema_global_step_alpha
                         )
                         if "update_ratio" in state and state["update_ratio"] is not None:
                             self.update_ratio_ema_step = _compute_ema(
@@ -388,8 +384,8 @@ class Trainer:
                         state["grad_norm_ema_step"]    = self.grad_norm_ema_step
                         state["update_ratio_ema_step"] = self.update_ratio_ema_step
 
-                        if grad_norm is not None:
-                            epoch_grad_norm_sum += float(grad_norm)
+                        if state["grad_norm"] is not None:
+                            epoch_grad_norm_sum += float(state["grad_norm"])
                             epoch_grad_norm_n += 1
 
                         if "update_ratio" in state and state["update_ratio"] is not None:
@@ -401,7 +397,6 @@ class Trainer:
                         state["loss"] = loss_scalar
                         state["acc"] = acc
                         state["lr"] = _get_current_lr(self.optimizer)
-                        state["grad_norm"] = grad_norm
 
                         # momentum, b1, b2, weight decay
                         state["momentum"] = _get_momentum(self.optimizer)
@@ -421,7 +416,7 @@ class Trainer:
                         # stability checks
                         if loss_scalar is None or not math.isfinite(loss_scalar):
                             nan_inf_flag = 1
-                        if grad_norm is None or not (float("-inf") < float(grad_norm) < float("inf")):
+                        if state["grad_norm"] is None or not (float("-inf") < float(state["grad_norm"]) < float("inf")):
                             self.divergence_count += 1
 
                         # progress bar feedback

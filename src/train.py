@@ -72,16 +72,20 @@ def main():
     hooks.append(ckpt_io.make_checkpoint_hook())
 
     def _after_backward(state):
-        # gradient clipping
         max_norm = cfg.grad_clip_norm
+        pre = state.get("grad_norm_pre_clip", None)
         if max_norm is None:
+            # no clipping configured: mirror pre into post for consistent logs
+            state["grad_norm_post_clip"] = float(pre) if pre is not None else None
             state["clip"] = False
             return
-        total_norm = torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=float(max_norm))
-        try:
-            state["clip"] = float(total_norm) > float(max_norm)
-        except Exception:
-            state["clip"] = bool(total_norm > max_norm)
+
+        max_norm = float(max_norm)
+        total = torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm)
+        pre = float(total)
+        state["grad_norm_pre_clip"] = pre
+        state["grad_norm_post_clip"] = pre if pre <= max_norm else max_norm
+        state["clip"] = pre > max_norm
 
     hooks.append(LambdaHook(on_after_backward=_after_backward))
 
