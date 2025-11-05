@@ -108,12 +108,13 @@ def build_baseline_scheduler(
             raise ValueError("OneCycle requires positive steps_per_epoch and epochs.")
         total_steps = steps_per_epoch * epochs
         max_lr = optim_cfg.lr
+        pct = sched_cfg.pct_start if sched_cfg.pct_start is not None else 0.1
         # pct_start validated in config; OneCycleLR handles anneal strategy
         scheduler = sched.OneCycleLR(
             optimizer,
             max_lr=max_lr,
             total_steps=total_steps,
-            pct_start=sched_cfg.pct_start or 0.1,
+            pct_start=pct,
             anneal_strategy="cos",
             div_factor=optim_cfg.extra.get("onecycle_div_factor", 25.0),
             final_div_factor=optim_cfg.extra.get("onecycle_final_div_factor", 1e4),

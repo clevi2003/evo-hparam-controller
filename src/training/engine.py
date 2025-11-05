@@ -320,6 +320,10 @@ class Trainer:
                             state["update_ratio"] = ratio
                             self.hooks.on_after_optimizer_step(state)
 
+                        if self.scheduler is not None and self.scheduler_step_when == "batch":
+                            # OneCycleLR (and any other per-batch schedulers) should step AFTER optimizer.step()
+                            self.scheduler.step()
+
                         # update counters and collect metrics
                         self.global_step += 1
                         state["global_step"] = self.global_step
