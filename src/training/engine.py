@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Literal
 import sys
 import torch
 from torch.utils.data import DataLoader
+from torch.nn.utils import parameters_to_vector as _p2v
 from src.core.hooks.hook_base import Hook, NullHook
 import time
 import math
@@ -57,18 +58,21 @@ def _detach_scalar(x: torch.Tensor | float | int | None) -> Optional[float]:
             return float(x.detach().mean().item())
     return float(x)
 
-
-def _compute_grad_norm(model: torch.nn.Module) -> Optional[float]:
-    total = 0.0
-    has_grad = False
-    for p in model.parameters():
-        if p.grad is not None:
-            has_grad = True
-            param_norm = p.grad.data.norm(2)
-            total += float(param_norm.item() ** 2)
-    if not has_grad:
-        return None
-    return float(total ** 0.5)
+def _grad_l2_norm(model: torch.nn.Module) -> Optional[float]:
+    with torch.no_grad():
+        sq = 0.0
+        seen = False
+        for p in model.parameters():
+            g = p.grad
+            if g is None:
+                continue
+            seen = True
+            if g.is_sparse:
+                g = g.coalesce().values()
+            sq += float(g.detach().pow(2).sum().item())
+        if not seen:
+            return None
+        return math.sqrt(sq)
 
 def _compute_ema(new, ema, alpha):
     if new is None:
@@ -293,32 +297,67 @@ class Trainer:
 
                         # backward
                         self.optimizer.zero_grad(set_to_none=True)
-
                         if self.mixed_precision:
                             self.scaler.scale(loss).backward()
-                            self.scaler.unscale_(self.optimizer)
-                            self.hooks.on_after_backward(state)
-                            self.hooks.on_before_optimizer_step(state)
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                            self.hooks.on_after_optimizer_step(state)
-
+                            self.scaler.unscale_(self.optimizer) 
                         else:
                             loss.backward()
-                            self.hooks.on_after_backward(state)
-                            self.hooks.on_before_optimizer_step(state)
 
-                            with torch.no_grad():
-                                before = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
+                        grad_norm = _grad_l2_norm(self.model)
+                        state["grad_norm"] = grad_norm
 
+                        if self.grad_clip is not None:
+                            grad_norm_before_clip = grad_norm
+                            _ = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                            grad_norm_after_clip = _grad_l2_norm(self.model)  
+                            state["grad_norm_pre_clip"]  = grad_norm_before_clip
+                            state["grad_norm_post_clip"] = grad_norm_after_clip
+
+                        with torch.no_grad():
+                            before = _p2v([p for p in self.model.parameters() if p.requires_grad])
+
+                        self.hooks.on_after_backward(state)
+                        self.hooks.on_before_optimizer_step(state)
+
+                        if self.mixed_precision:
+                            self.scaler.step(self.optimizer)
+                            self.scaler.update()
+                        else:
                             self.optimizer.step()
 
-                            with torch.no_grad():
-                                after = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
-                                delta = after - before
-                                ratio = (delta.norm(2) / (before.norm(2) + 1e-12)).item()
-                            state["update_ratio"] = ratio
-                            self.hooks.on_after_optimizer_step(state)
+                        self.hooks.on_after_optimizer_step(state)
+
+                        with torch.no_grad():
+                            after = _p2v([p for p in self.model.parameters() if p.requires_grad])
+                            delta = after - before
+                            ratio = (delta.norm(2) / (before.norm(2) + 1e-12)).item()
+                        state["update_ratio"] = ratio
+
+                        # if self.mixed_precision:
+                        #     self.scaler.scale(loss).backward()
+                        #     self.scaler.unscale_(self.optimizer)
+                        #     self.hooks.on_after_backward(state)
+                        #     self.hooks.on_before_optimizer_step(state)
+                        #     self.scaler.step(self.optimizer)
+                        #     self.scaler.update()
+                        #     self.hooks.on_after_optimizer_step(state)
+
+                        # else:
+                        #     loss.backward()
+                        #     self.hooks.on_after_backward(state)
+                        #     self.hooks.on_before_optimizer_step(state)
+
+                        #     with torch.no_grad():
+                        #         before = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
+
+                        #     self.optimizer.step()
+
+                        #     with torch.no_grad():
+                        #         after = torch.cat([p.view(-1) for p in self.model.parameters() if p.requires_grad])
+                        #         delta = after - before
+                        #         ratio = (delta.norm(2) / (before.norm(2) + 1e-12)).item()
+                        #     state["update_ratio"] = ratio
+                        #     self.hooks.on_after_optimizer_step(state)
 
                         # update counters and collect metrics
                         self.global_step += 1
@@ -331,8 +370,6 @@ class Trainer:
                             except Exception:
                                 acc = None
 
-                        # grad norm
-                        grad_norm = _compute_grad_norm(self.model)
                         loss_scalar = _detach_scalar(loss)
 
                         # global step emas
