@@ -47,7 +47,6 @@ def _default_accuracy_fn(logits: torch.Tensor, targets: torch.Tensor) -> float:
     total = targets.numel()
     return float(correct / max(1, total))
 
-
 def _detach_scalar(x: torch.Tensor | float | int | None) -> Optional[float]:
     if x is None:
         return None
@@ -361,7 +360,9 @@ class Trainer:
                         #     self.hooks.on_after_optimizer_step(state)
 
                         if self.scheduler is not None and self.scheduler_step_when == "batch":
+                            # OneCycleLR (and any other per-batch schedulers) should step AFTER optimizer.step()
                             self.scheduler.step()
+
                         # update counters and collect metrics
                         self.global_step += 1
                         state["global_step"] = self.global_step
