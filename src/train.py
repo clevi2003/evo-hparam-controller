@@ -15,7 +15,7 @@ from src.training.logging_hooks import (
 )
 from src.core.hooks.hook_composition import HookList
 from src.core.hooks.common_hooks import LambdaHook
-from src.training.engine import Trainer
+from src.training.engine import Trainer, _grad_l2_norm
 from src.data_.cifar10 import get_dataloaders
 from src.models.resnet_cifar10 import resnet20
 
@@ -75,13 +75,22 @@ def main():
         # gradient clipping
         max_norm = cfg.grad_clip_norm
         if max_norm is None:
-            state["clip"] = False
-            return
-        total_norm = torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=float(max_norm))
-        try:
-            state["clip"] = float(total_norm) > float(max_norm)
-        except Exception:
-            state["clip"] = bool(total_norm > max_norm)
+            pre = _grad_l2_norm(state.model)
+            state["grad_norm_pre_clip"] = pre
+            state["grad_norm_post_clip"] = pre
+        else:
+            # returns pre-clip norm and clips in-place
+            pre = float(torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm))
+            state["grad_norm_pre_clip"] = pre
+            state["grad_norm_post_clip"] = min(pre, max_norm)
+        # if max_norm is None:
+        #     state["clip"] = False
+        #     return
+        # total_norm = torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_norm=float(max_norm))
+        # try:
+        #     state["clip"] = float(total_norm) > float(max_norm)
+        # except Exception:
+        #     state["clip"] = bool(total_norm > max_norm)
 
     hooks.append(LambdaHook(on_after_backward=_after_backward))
 
