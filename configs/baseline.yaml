@@ -22,7 +22,7 @@ model:
 
 # Optimizer
 optim:
-  name: "adamw"
+  name: "sgd"
   lr: 0.1
   momentum: 0.9
   weight_decay: 0.0005

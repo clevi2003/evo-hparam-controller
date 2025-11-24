@@ -75,7 +75,7 @@ def main():
         # gradient clipping
         max_norm = cfg.grad_clip_norm
         if max_norm is None:
-            pre = _grad_l2_norm(state.model)
+            pre = _grad_l2_norm(state["model"])
             state["grad_norm_pre_clip"] = pre
             state["grad_norm_post_clip"] = pre
         else:
