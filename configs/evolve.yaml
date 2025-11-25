@@ -1,13 +1,13 @@
 search:
   algo: "ga" # or "es" or "cmaes"
-  pop_size: 2
+  pop_size: 1
   parents: 1
   mutate_sigma: 0.05
   elite: 1
-  generations: 2
+  generations: 50
 budget:
-  epochs: 2
-  fixed_seed: 2025
+  epochs: 200
+  fixed_seed: 1234
   fixed_subset_pct: 0.1
 fitness:
   primary: "auc_val_acc"
