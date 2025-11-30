@@ -5,12 +5,12 @@ Black-box evolutionary optimization for learning state-dependent hyperparameter 
 
 ## Overview
 
-This repository implements and benchmarks evolutionary algorithms (ES, CMA-ES, genetic algorithms) for optimizing hyperparameter controllers—parameterized policies that adapt learning rates, momentum, and weight decay based on training state (loss, gradients, epoch progression).
+This repository implements and benchmarks evolutionary algorithms for optimizing hyperparameter controllers, parameterized policies that adapt learning rates, momentum, and weight decay based on training state (loss, gradients, epoch progression).
 
 **Benchmark**: CIFAR-10 classification with ResNet-20  
 **Controller Input**: Training metrics (loss, gradient norm, epoch fraction)  
 **Controller Output**: Per-iteration hyperparameter adjustments  
-**Optimization**: Population-based black-box methods with fitness evaluation via training performance
+**Optimization**: Population-based methods with fitness evaluation via training performance
 
 ## Key Research Questions
 
