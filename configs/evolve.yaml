@@ -1,14 +1,21 @@
 search:
-  algo: "ga" # or "es" or "cmaes"
+  algo: "ga"        # or "es" or "cmaes"
   pop_size: 2
   parents: 1
   mutate_sigma: 0.05
   elite: 1
   generations: 2
+
+  warm_start_candidates_dir: null # null if not enabled, otherwise path to dir with controller checkpoints
+  warm_start_num_candidates: 0 # number to use from warm start dir, if 0 all will be new and random, otherwise will use this many randomly selected from the warm start dir
+
 budget:
   epochs: 2
   fixed_seed: 2025
   fixed_subset_pct: 0.1
+  start_from_checkpoint: false # true means load model from checkpoint_path
+  checkpoint_path: null # path to pretrained model checkpoint
+
 fitness:
   primary: "auc_val_acc"
   penalties:

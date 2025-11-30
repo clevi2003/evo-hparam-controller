@@ -185,6 +185,30 @@ class TruncatedTrainingEvaluator:
         )
         model = resnet20().to(self.device)
 
+        # optional warm start from checkpoint, controlled by evolve.budget
+        start_from_ckpt = bool(getattr(self.budget_cfg, "start_from_checkpoint", False))
+        ckpt_path = getattr(self.budget_cfg, "checkpoint_path", None)
+
+        if start_from_ckpt and ckpt_path:
+            ckpt_path = Path(ckpt_path)
+            if not ckpt_path.is_file():
+                print(
+                    f"[evolve] WARNING: start_from_checkpoint=True but "
+                    f"checkpoint_path='{ckpt_path}' does not exist; using random init."
+                )
+            else:
+                try:
+                    bundle = torch.load(ckpt_path, map_location="cpu")
+                    # handle both {"model_state": state_dict} and raw state_dict
+                    state_dict = bundle.get("model_state", bundle)
+                    model.load_state_dict(state_dict, strict=True)
+                    print(f"[evolve] Loaded model checkpoint from '{ckpt_path}'.")
+                except Exception as e:
+                    print(
+                        f"[evolve] WARNING: failed to load checkpoint from '{ckpt_path}': {e}. "
+                        "Using random init."
+                    )
+
         # optimizer & base scheduler
         optimizer = build_optimizer(model, self.train_cfg.optim)
         steps_per_epoch = len(train_loader) if hasattr(train_loader, "__len__") else 0
