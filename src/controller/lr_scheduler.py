@@ -135,6 +135,11 @@ class LrControllerScheduler:
     def current_lr(self) -> float:
         """Average effective LR across param groups for quick logging"""
         return self._avg(self._effective_lrs)
+        
+    #Add the current base learning rate method (Kevin)
+    def current_base_lr(self) -> float:
+        """Average base LR across param groups (before controller scaling)."""
+        return self._avg(self._base_lrs)
 
     def lrs(self) -> List[float]:
         """Effective LRs per param group"""

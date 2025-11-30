@@ -72,7 +72,9 @@ class _TrainMetricsHook(Hook):
                 "batch_idx": int(state.get("batch_idx", -1)),
                 "loss": _to_float(state.get("loss")),
                 "acc": _to_float(state.get("acc")),
+                #updated learning rate (Kevin)
                 "lr": _to_float(state.get("lr")),
+                "lr_base": _to_float(state.get("lr_base")), #base_lr
                 "grad_norm": _to_float(state.get("grad_norm")),
                 "clip": int(bool(state.get("clip", False))),
                 "update_ratio": _to_float(state.get("update_ratio")),
@@ -97,7 +99,9 @@ class _TrainMetricsHook(Hook):
                 "global_step": int(state.get("global_step", 0)),
                 "best_val_acc": _to_float(state.get('best_val_acc')),
                 "nan_inf_flag": int(state.get("nan_inf_flag", 0)),
+                #update learning rate (Kevin)
                 "lr": _to_float(state.get("lr")),
+                "lr_base": _to_float(state.get("lr_base")), #base lr
                 "grad_norm": _to_float(state.get("grad_norm")),
                 "momentum": _to_float(state.get("momentum")),
                 "beta1": _to_float(state.get("beta1")),
@@ -129,8 +133,10 @@ class _TrainMetricsHook(Hook):
                 "best_val_acc": _to_float(state.get('best_val_acc')),
                 "final_val_acc": _to_float(state.get("val_acc")),
                 "final_train_acc": _to_float(state.get("acc")),
+                #update the learning rate(Kevin)
                 "lr": _to_float(state.get("lr")),
-                "grad_norm": _to_float(state.get("grad_norm")),
+                "lr_base": _to_float(state.get("lr_base")), #base lr
+                "grad_norm": _to_float(state.get("grad_norm")), 
                 "final_train_acc": float(state.get("acc") or 0.0),
                 "momentum": _to_float(state.get("momentum")),
                 "beta1": _to_float(state.get("beta1")),

@@ -4,6 +4,8 @@ import sys
 import torch
 from torch.utils.data import DataLoader
 from src.core.hooks.hook_base import Hook, NullHook
+#add learning rate controller schedule (Kevin)
+from src.controller.lr_scheduler import LrControllerScheduler
 import time
 import math
 
@@ -205,7 +207,9 @@ class Trainer:
             "T_train": None,
             "epoch_avg_T": None,
             "samples_per_s": None,
-            "lr": _get_current_lr(self.optimizer),
+            #update learning rate (Kevin)
+            "lr": _get_current_lr(self.optimizer), #applied learning rate
+            "lr_base": None,  #base learning rate
             "grad_norm": None,
             "nan_inf_flag": 0,
             "divergence_count": 0,
@@ -367,9 +371,25 @@ class Trainer:
                         state["targets"] = targets.detach()
                         state["loss"] = loss_scalar
                         state["acc"] = acc
-                        state["lr"] = _get_current_lr(self.optimizer)
-                        state["grad_norm"] = grad_norm
 
+                        #updated learning rate logging (Kevin)
+                        ## Applied learning rate logging: the optimizer is currently using 
+                        lr_applied = _get_current_lr(self.optimizer)
+                        lr_base = None
+                        # when controller scheduler:
+                        if isinstance(self.scheduler, LrControllerScheduler):
+                            try:
+                                lr_applied = float(self.scheduler.current_lr())          # applied LR
+                            except Exception:
+                                pass
+                            try:
+                                lr_base = float(self.scheduler.current_base_lr())        # nominal LR
+                            except Exception:
+                                lr_base = None
+                        state["lr"] = lr_applied        #  APPLIED LR
+                        state["lr_base"] = lr_base      # base LR
+                        
+                        state["grad_norm"] = grad_norm
                         # momentum, b1, b2, weight decay
                         state["momentum"] = _get_momentum(self.optimizer)
                         state["weight_decay"] = _get_weight_decay(self.optimizer)
