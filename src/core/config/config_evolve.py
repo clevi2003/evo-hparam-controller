@@ -13,6 +13,7 @@ class SearchCfg:
     p_mutation: float = 0.2
     tournament_k: int = 3
     sigma_decay: float = 1.0  # 1.0 = no decay
+    generations: int = 10
     warm_start_candidates_dir: Optional[str] = None
     warm_start_num_candidates: int = 0
 
@@ -78,6 +79,8 @@ class FitnessWeightsCfg:
 @dataclass
 class EvolveLoggingCfg:
     artifacts: bool = True # write per-candidate parquet artifacts (can be disabled for speed)
+    save_top_k_controllers: int = 1
+    save_best_model: bool = False
 
 
 @dataclass
