@@ -83,6 +83,8 @@ class EvaluatorConfig:
     write_train_val_logs: bool = True
     checkpoint_io: Optional[CheckpointIO] = None
 
+    save_candidate_models: bool = False
+
     # inject fitness weights & static IDs to be stamped on parquet rows
     fitness_weights: Optional[FitnessWeights] = None
     static_ids: Optional[Dict[str, Any]] = None  # set per-candidate from runner
@@ -135,7 +137,14 @@ class TruncatedTrainingEvaluator:
         # builders
         self._model_builder = self.cfg.model_builder or (lambda arch, nc: resnet20())
         self._data_builder = self.cfg.dataloaders_builder or (
-            lambda root, bs, nw, pct, seed: get_dataloaders(root=root, batch_size=bs, num_workers=nw, augment=True)
+            lambda root, bs, nw, pct, seed: get_dataloaders(
+                root=root,
+                batch_size=bs,
+                num_workers=nw,
+                augment=getattr(self.train_cfg.data, "augment", True),
+                subset_fraction=pct,
+                subset_seed=seed,
+            )
         )
 
         # optional output dir for Parquet logs
@@ -177,13 +186,42 @@ class TruncatedTrainingEvaluator:
         seed_everything(self.budget_cfg.fixed_seed)
 
         # Data / Model
-        train_loader, val_loader = get_dataloaders(
+        subset_fraction = float(getattr(self.budget_cfg, "fixed_subset_pct", 1.0) or 1.0)
+        subset_seed = int(getattr(self.budget_cfg, "fixed_seed", 2025))
+
+        train_loader, val_loader = self._data_builder(
             root=self.train_cfg.data.data_root,
-            batch_size=self.train_cfg.data.batch_size,
-            num_workers=self.train_cfg.data.num_workers,
-            augment=getattr(self.train_cfg.data, "augment", True),
+            bs=self.train_cfg.data.batch_size,
+            nw=self.train_cfg.data.num_workers,
+            pct=subset_fraction,
+            seed=subset_seed,
         )
+
         model = resnet20().to(self.device)
+
+        # optional warm start from checkpoint, controlled by evolve.budget
+        start_from_ckpt = bool(getattr(self.budget_cfg, "start_from_checkpoint", False))
+        ckpt_path = getattr(self.budget_cfg, "checkpoint_path", None)
+
+        if start_from_ckpt and ckpt_path:
+            ckpt_path = Path(ckpt_path)
+            if not ckpt_path.is_file():
+                print(
+                    f"[evolve] WARNING: start_from_checkpoint=True but "
+                    f"checkpoint_path='{ckpt_path}' does not exist; using random init."
+                )
+            else:
+                try:
+                    bundle = torch.load(ckpt_path, map_location="cpu")
+                    # handle both {"model_state": state_dict} and raw state_dict
+                    state_dict = bundle.get("model_state", bundle)
+                    model.load_state_dict(state_dict, strict=True)
+                    print(f"[evolve] Loaded model checkpoint from '{ckpt_path}'.")
+                except Exception as e:
+                    print(
+                        f"[evolve] WARNING: failed to load checkpoint from '{ckpt_path}': {e}. "
+                        "Using random init."
+                    )
 
         # optimizer & base scheduler
         optimizer = build_optimizer(model, self.train_cfg.optim)
@@ -332,6 +370,21 @@ class TruncatedTrainingEvaluator:
             total_steps=int(summary.get("final_step", 0)),
             total_epochs=int(summary.get("final_epoch", 0)),
         )
+
+        # optionally save the ResNet model for this candidate
+        if getattr(self.cfg, "save_candidate_models", False):
+            cid = None
+            if static_ids is not None:
+                cid = static_ids.get("candidate_id", None)
+
+            if cid is not None and self.out_dir is not None:
+                try:
+                    models_dir = self.out_dir / "models"
+                    models_dir.mkdir(parents=True, exist_ok=True)
+                    model_path = models_dir / f"model_{cid}.pt"
+                    torch.save({"model_state": model.state_dict()}, model_path)
+                except Exception as e:
+                    print(f"WARNING: failed to save model for candidate {cid}: {e}")
 
         # fitness
         fitness_score = score_run(run_summary, self.fitness_weights)

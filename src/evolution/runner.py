@@ -9,10 +9,11 @@ import time
 import numpy as np
 import torch
 from uuid import uuid4
+import shutil
 
 from src.core.config import load_train_cfg, load_controller_cfg, load_evolve_cfg
 from src.utils.seed_device import seed_everything
-#from src.controller.serialization import flatten_params, to_numpy
+from src.controller.serialization import flatten_params, to_numpy, load_vector
 from src.evolution.evaluator import TruncatedTrainingEvaluator, EvaluatorConfig
 from src.evolution.algorithms import Strategy, GA, GAConfig, ES, ESConfig, Genome
 from src.controller.controller import ControllerMLP
@@ -48,6 +49,36 @@ def _build_strategy(evo_cfg) -> Strategy:
         return ES(cfg)
     else:
         raise ValueError(f"Unsupported evolution algo '{evo_cfg.search.algo}'. Use 'ga' or 'es'.")
+
+def _load_warmstart_vector(path: Path) -> np.ndarray:
+    """Load a controller vector from various checkpoint formats."""
+    payload = torch.load(path, map_location="cpu")
+
+    # our save_vector format
+    if isinstance(payload, dict) and "vector" in payload:
+        vec_t = payload["vector"]
+
+    # CheckpointIO.save_best_vector format
+    elif isinstance(payload, dict) and "controller_vec" in payload:
+        vec_t = torch.tensor(payload["controller_vec"], dtype=torch.float32)
+
+    # {"vec": ...} format
+    elif isinstance(payload, dict) and "vec" in payload:
+        v = payload["vec"]
+        if isinstance(v, torch.Tensor):
+            vec_t = v
+        else:
+            vec_t = torch.as_tensor(v, dtype=torch.float32)
+
+    # raw tensor / ndarray
+    elif isinstance(payload, torch.Tensor):
+        vec_t = payload
+    elif isinstance(payload, np.ndarray):
+        vec_t = torch.from_numpy(payload.astype(np.float32))
+    else:
+        raise ValueError(f"Unsupported warm-start payload format in {path}")
+
+    return to_numpy(vec_t.view(-1))
 
 
 def run(args: argparse.Namespace) -> None:
@@ -110,6 +141,7 @@ def run(args: argparse.Namespace) -> None:
             "mode": "evolve",
             "exp_name": getattr(train_cfg, "exp_name", getattr(evo_cfg, "exp_name", "")) or "",
         },
+        save_candidate_models=getattr(evo_cfg.logging, "save_best_model", False),
     )
     evaluator = TruncatedTrainingEvaluator(
         train_cfg=train_cfg,
@@ -126,7 +158,6 @@ def run(args: argparse.Namespace) -> None:
     # parameter dimension
     in_dim = len(ctrl_cfg.features)
     controller = ControllerMLP(in_dim=in_dim, hidden=ctrl_cfg.controller_arch.hidden, max_step=ctrl_cfg.action.max_step).to(device)
-    from src.controller.serialization import flatten_params, to_numpy
     v0_t = flatten_params(controller, device=device, dtype=torch.float32)
     dim = int(v0_t.numel())
     v0_np = to_numpy(v0_t)
@@ -134,8 +165,61 @@ def run(args: argparse.Namespace) -> None:
     strategy = _build_strategy(evo_cfg)
     strategy.initialize(dim=dim, init_vec=v0_np)
 
-    generations = args.generations or getattr(evo_cfg, "generations", 1)
+    if args.generations is not None:
+        generations = args.generations
+    else:
+        generations = getattr(evo_cfg.search, "generations", 1)
     cand_count = getattr(evo_cfg.search, "pop_size", 32)
+
+    warm_start_dir = getattr(evo_cfg.search, "warm_start_candidates_dir", None)
+    warm_start_num = int(getattr(evo_cfg.search, "warm_start_num_candidates", 0) or 0)
+
+    use_warm_start = bool(warm_start_dir) and warm_start_num > 0
+    warm_vectors: list[np.ndarray] = []
+
+    top_k = int(getattr(evo_cfg.logging, "save_top_k_controllers", 0) or 0)
+    top_controllers: list[tuple[float, np.ndarray, str]] = []  # (fitness, vec, candidate_id)
+
+    if use_warm_start:
+        warm_path = Path(warm_start_dir)
+        if not warm_path.is_dir():
+            print(
+                f"[evolve] WARNING: warm_start_candidates_dir='{warm_path}' "
+                "is not a directory; ignoring warm start."
+            )
+            use_warm_start = False
+        else:
+            files = sorted(warm_path.glob("*.pt"))
+            if not files:
+                print(
+                    f"[evolve] WARNING: no .pt files found in "
+                    f"warm_start_candidates_dir='{warm_path}'; ignoring warm start."
+                )
+                use_warm_start = False
+            else:
+                # We may need fewer or more than the number of files; sample with replacement.
+                k = min(warm_start_num, cand_count)
+                rng = np.random.default_rng(
+                    fixed_seed if fixed_seed is not None else base_seed
+                )
+                indices = rng.integers(0, len(files), size=k)
+
+                for idx in indices:
+                    vec_np = _load_warmstart_vector(files[idx])  # np.ndarray
+                    if vec_np.size != dim:
+                        raise ValueError(
+                            f"Warm-start vector '{files[idx]}' has size {vec_np.size}, "
+                            f"expected {dim}."
+                        )
+                    warm_vectors.append(vec_np.astype(np.float64, copy=True))
+
+                if warm_vectors:
+                    print(
+                        f"[evolve] Warm-starting generation 0 with "
+                        f"{len(warm_vectors)} candidate(s) from '{warm_path}'."
+                    )
+                else:
+                    use_warm_start = False
 
     best_fitness = -np.inf
     best_genome: Optional[Genome] = None
@@ -154,6 +238,19 @@ def run(args: argparse.Namespace) -> None:
 
             results = []
             fitnesses = []
+
+            if gen == 0 and use_warm_start and warm_vectors:
+                num_to_overwrite = min(len(warm_vectors), len(genomes))
+                for i in range(num_to_overwrite):
+                    # overwrite the candidate's vector inplace
+                    g = genomes[i]
+                    v = warm_vectors[i]
+                    if g.vec.shape != v.shape:
+                        raise ValueError(
+                            f"Warm-start vec shape {v.shape} does not match genome.vec "
+                            f"shape {g.vec.shape}"
+                        )
+                    g.vec[...] = v
 
             cand_pbar = tqdm(enumerate(genomes), total=len(genomes), desc=f"Gen {gen}", dynamic_ncols=True, leave=False, disable=disable_tqdm, position=1)
 
@@ -180,6 +277,14 @@ def run(args: argparse.Namespace) -> None:
                 fitness_value = float(res.fitness_primary)
                 fitnesses.append(fitness_value)
                 genome.fitness = fitness_value
+
+                # track global top-k controller vectors
+                if top_k > 0 and vec is not None and not np.isnan(fitness_value):
+                    arr = np.asarray(vec, dtype=np.float32).copy()
+                    top_controllers.append((fitness_value, arr, candidate_id))
+                    top_controllers.sort(key=lambda x: x[0], reverse=True)
+                    if len(top_controllers) > top_k:
+                        top_controllers = top_controllers[:top_k]
 
                 cand_pbar.set_postfix(last_fit=f"{fitness_value:.4f}")
 
@@ -298,6 +403,38 @@ def run(args: argparse.Namespace) -> None:
         gen_pbar.close()
 
         elapsed = time.time() - t_start
+
+        # save top-k controller vectors if requested
+        if top_k > 0 and top_controllers:
+            ckpt_dir = out_dir / "checkpoints"
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            for rank, (fit, vec_arr, cid) in enumerate(top_controllers, start=1):
+                path = ckpt_dir / f"top{rank}_controller_vec.pt"
+                try:
+                    torch.save(
+                        {"vec": vec_arr, "fitness": float(fit), "candidate_id": cid},
+                        path,
+                    )
+                    tqdm.write(f"[evolve] Saved top-{rank} controller to: {path}")
+                except Exception as e:
+                    tqdm.write(f"[evolve] WARNING: failed to save top-{rank} controller: {e}")
+        # save best ResNet model if requested
+        if getattr(evo_cfg.logging, "save_best_model", False) and best_genome is not None:
+            try:
+                import shutil
+                best_cid = getattr(best_genome, "candidate_id", None)
+                if best_cid is not None:
+                    src = out_dir / "artifacts" / "models" / f"model_{best_cid}.pt"
+                    dst = out_dir / "checkpoints" / "best_model.pt"
+                    if src.is_file():
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+                        tqdm.write(f"[evolve] Saved best model to: {dst}")
+                    else:
+                        tqdm.write(f"[evolve] WARNING: model file for best candidate not found: {src}")
+            except Exception as e:
+                tqdm.write(f"[evolve] WARNING: failed to save best model: {e}")
+
         if best_genome is not None:
             tqdm.write(f"[evolve] Best fitness: {best_fitness:.6f} in {elapsed:.1f}s")
             try:

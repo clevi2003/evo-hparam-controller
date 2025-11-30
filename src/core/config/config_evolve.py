@@ -13,6 +13,9 @@ class SearchCfg:
     p_mutation: float = 0.2
     tournament_k: int = 3
     sigma_decay: float = 1.0  # 1.0 = no decay
+    generations: int = 10
+    warm_start_candidates_dir: Optional[str] = None
+    warm_start_num_candidates: int = 0
 
     def validate(self) -> None:
         _ensure_choice("evolve.search.algo", self.algo, ["ga", "es", "cmaes"])
@@ -27,6 +30,17 @@ class SearchCfg:
             raise ValueError("evolve.search.parents must be <= pop_size.")
         if self.elite > self.pop_size:
             raise ValueError("evolve.search.elite must be <= pop_size.")
+        if self.warm_start_num_candidates < 0:
+            raise ValueError("evolve.search.warm_start_num_candidates must be >= 0.")
+        if self.warm_start_num_candidates > 0 and not self.warm_start_candidates_dir:
+            raise ValueError(
+                "evolve.search.warm_start_candidates_dir must be set if "
+                "warm_start_num_candidates > 0."
+            )
+        if self.warm_start_num_candidates > self.pop_size:
+            raise ValueError(
+                "evolve.search.warm_start_num_candidates must be <= pop_size."
+            )
 
 
 @dataclass
@@ -35,6 +49,8 @@ class BudgetCfg:
     fixed_seed: int = 2025
     fixed_subset_pct: float = 0.3  # for CIFAR-10 etc.; evaluator should honor this
     max_steps: Optional[int] = None
+    start_from_checkpoint: bool = False
+    checkpoint_path: Optional[str] = None
 
     def validate(self) -> None:
         _ensure_positive("evolve.budget.epochs", self.epochs)
@@ -42,6 +58,10 @@ class BudgetCfg:
         _ensure_between("evolve.budget.fixed_subset_pct", self.fixed_subset_pct, 0.0, 1.0)
         if self.max_steps is not None:
             _ensure_positive("evolve.budget.max_steps", self.max_steps)
+        if self.start_from_checkpoint and not self.checkpoint_path:
+            raise ValueError(
+                "evolve.budget.checkpoint_path must be set if start_from_checkpoint is True."
+            )
 
 
 @dataclass
@@ -59,6 +79,8 @@ class FitnessWeightsCfg:
 @dataclass
 class EvolveLoggingCfg:
     artifacts: bool = True # write per-candidate parquet artifacts (can be disabled for speed)
+    save_top_k_controllers: int = 1
+    save_best_model: bool = False
 
 
 @dataclass
