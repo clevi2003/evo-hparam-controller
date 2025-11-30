@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-
+from src.data_.cifar10 import get_dataloaders
 from src.controller.controller import ControllerMLP
 from src.controller.features import FeatureExtractor
 from src.controller.lr_scheduler import LrControllerScheduler
@@ -88,6 +88,7 @@ class EvalResult:
     budget_used: Dict[str, float] = None
     truncation_reason: str = "complete"
     artifacts: Optional[Dict[str, str]] = None
+    summary: Optional[RunSummary] = None
 
     def __post_init__(self) -> None:
         if self.penalties is None:
@@ -122,7 +123,7 @@ class TruncatedTrainingEvaluator:
         # Builders
         self._model_builder = self.cfg.model_builder or (lambda arch, nc: resnet20())
         self._data_builder = self.cfg.dataloaders_builder or (lambda root, bs, nw, pct, seed: 
-            __import__('src.data_.cifar10').get_dataloaders(
+            get_dataloaders(
                 root=root, batch_size=bs, num_workers=nw, augment=True, subset_fraction=pct, subset_seed=seed
             )
         )
@@ -133,20 +134,34 @@ class TruncatedTrainingEvaluator:
             nan_penalty=100.0,
         )
 
-
     def evaluate_result(self, candidate: Any, static_ids: Optional[Dict[str, Any]] = None) -> EvalResult:
         raw = self.evaluate(candidate, static_ids=static_ids)
-        fitness_score = float(raw.get("fitness", 0.0))
-        auc_val = float(raw["metrics_snapshot"].get("auc_val_acc", 0.0))
-        lr_vol = float(raw["metrics_snapshot"].get("lr_delta_std", 0.0))
-        return EvalResult(
-            fitness_primary=fitness_score,
-            primary_metric=self.fitness_weights.primary,
-            metrics_snapshot={
-                "auc_val_acc": auc_val,
-                "lr_delta_std": lr_vol,
-            },
-        )
+
+        # If someone ever returns an EvalResult directly, just pass it through.
+        if isinstance(raw, EvalResult):
+            return raw
+        elif isinstance(raw, dict):
+            metrics = dict(raw.get("metrics_snapshot", {}) or {})
+            return EvalResult(
+                fitness_primary=float(raw.get("fitness", raw.get("fitness_primary", 0.0))),
+                primary_metric=str(raw.get("primary_metric", self.fitness_weights.primary)),
+                fitness_vector=list(raw.get("fitness_vector", [])) if raw.get("fitness_vector") is not None else [],
+                penalties=dict(raw.get("penalties", {})),
+                metrics_snapshot=metrics,
+                budget_used=dict(raw.get("budget_used", {"epochs": 0, "steps": 0, "wall_time_s": 0.0})),
+                truncation_reason=str(raw.get("truncation_reason", "complete")),
+                artifacts=dict(raw.get("artifacts", {})) if raw.get("artifacts") else {},
+                summary=raw.get("summary", None),  # <- this is the RunSummary from evaluate()
+            )
+        else:
+            try:
+                fitness_val = float(raw)
+            except Exception:
+                fitness_val = 0.0
+            return EvalResult(
+                fitness_primary=fitness_val,
+                primary_metric=self.fitness_weights.primary,
+            )
 
 
     def evaluate(self, controller_vector: Any, static_ids: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
