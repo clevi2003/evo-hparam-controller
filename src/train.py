@@ -20,8 +20,8 @@ from src.data_.cifar10 import get_dataloaders
 from src.models.resnet_cifar10 import resnet20
 
 #import the ECE and NLL hook (Kevin)
-from src.core.ECE_and_NLL.ece_hook import ECEHook
-from  src.core.ECE_and_NLL.nll_hook import NLLHook
+from src.ECE_and_NLL.ece_hook import ECEHook
+from src.ECE_and_NLL.nll_hook import NLLHook
 
 def parse_args():
     p = argparse.ArgumentParser("Baseline trainer")
