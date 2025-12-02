@@ -20,7 +20,7 @@ from src.data_.cifar10 import get_dataloaders
 from src.models.resnet_cifar10 import resnet20
 
 #import the ECE and NLL hook (Kevin)
-from src.ECE_and_NLL.ece_hook import ECEHook
+from OneDrive/Documents/GitHub/evo-hparam-controller/src/ECE_and _NLL import ECEHook
 from src.ECE_and_NLL.nll_hook import NLLHook
 
 def parse_args():
