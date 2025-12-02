@@ -71,6 +71,15 @@ class _DivergenceGuardHook(Hook):
         if math.isnan(v) or math.isinf(v):
             state["diverged"] = True
 
+class _CollectLrAndSchedulerHook(Hook):
+    def __init__(self, evaluator):
+        self.evaluator = evaluator
+
+    def on_batch_end(self, state):
+        if "lr" in state:
+            self.evaluator.current_lr = state["lr"]
+        if "scheduler_step" in state:
+            self.evaluator.scheduler_step = state["scheduler_step"]
 
 @dataclass
 class EvaluatorConfig:
@@ -133,6 +142,10 @@ class TruncatedTrainingEvaluator:
         self.device = get_device(getattr(train_cfg, "device", None))
         print("DEVICE:", self.device)
         self.cfg = evaluator_cfg or EvaluatorConfig()
+        # metrics collected during training
+        self.current_lr = None
+        self.scheduler_step = None
+
 
         # builders
         self._model_builder = self.cfg.model_builder or (lambda arch, nc: resnet20())
@@ -312,11 +325,12 @@ class TruncatedTrainingEvaluator:
         action_stream: List[float] = []
 
         collectors = HookList([
-            extractor,
-            runtime,
-            _CollectEvalPointsHook(val_curve),
-            _CollectActionDeltasHook(action_stream),
-            _DivergenceGuardHook(),
+        extractor,
+        runtime,
+        _CollectEvalPointsHook(val_curve),
+        _CollectActionDeltasHook(action_stream),
+        _DivergenceGuardHook(),
+        _CollectLrAndSchedulerHook(self),   
         ])
 
         # scalar parquet logging via hooks
@@ -445,3 +459,4 @@ class TruncatedTrainingEvaluator:
             LambdaHook(on_batch_end=log_train),
             LambdaHook(on_eval_end=log_val),
         ])
+

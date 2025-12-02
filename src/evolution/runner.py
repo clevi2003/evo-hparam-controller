@@ -278,6 +278,20 @@ def run(args: argparse.Namespace) -> None:
                 fitnesses.append(fitness_value)
                 genome.fitness = fitness_value
 
+                # additional metrics 
+                train_loss_raw = getattr(res, "train_loss_raw", np.nan)
+                train_loss_ema_step = getattr(res, "train_loss_ema_step", np.nan)
+                train_loss_ema_epoch = getattr(res, "train_loss_ema_epoch", np.nan)
+                val_loss = getattr(res, "val_loss", np.nan)
+
+                train_acc = getattr(res, "train_acc", np.nan)
+                val_acc = getattr(res, "val_acc", np.nan)
+                best_val_acc = getattr(res, "best_val_acc", np.nan)
+
+                lr = getattr(evaluator, "current_lr", np.nan)
+                scheduler_step = getattr(evaluator, "scheduler_step", np.nan)
+
+
                 # track global top-k controller vectors
                 if top_k > 0 and vec is not None and not np.isnan(fitness_value):
                     arr = np.asarray(vec, dtype=np.float32).copy()
@@ -314,7 +328,17 @@ def run(args: argparse.Namespace) -> None:
                         "exp_name": getattr(train_cfg, "exp_name", getattr(evo_cfg, "exp_name", "")) or "",
                         # controller_version is stamped by evaluator into ticks/train/val; optional here
                         "controller_version": "", # can compute from vec to duplicate
+                        "train_loss_raw": train_loss_raw,
+                        "train_loss_ema_step": train_loss_ema_step,
+                        "train_loss_ema_epoch": train_loss_ema_epoch,
+                        "val_loss": val_loss,
+                        "train_acc": train_acc,
+                        "val_acc": val_acc,
+                        "best_val_acc": best_val_acc,
+                        "lr": lr,
+                        "scheduler_step": scheduler_step,  # optional
                     })
+
                     evo_cand_logger.log(row)
                 except Exception:
                     pass
@@ -474,3 +498,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
