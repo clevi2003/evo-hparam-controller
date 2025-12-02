@@ -1,7 +1,7 @@
-mode: "baseline" # ["baseline", "evolve", "controlled-train"]
+mode: "controlled-train" # ["baseline", "evolve", "controlled-train"]
 
 controller_run:
-  ckpt_path: "some_path/controller_best.pt" # REQUIRED if mode is "controlled-train"
+  ckpt_path: "./runs/20251202T042719.429727Z_d063e154/checkpoints/best_controller_vec.pt" # REQUIRED if mode is "controlled-train"
   enabled: true
 
 # Seeds: 1337, 1338, 1339, 1340, 1341
@@ -11,7 +11,7 @@ exp_name: "resnet20_cifar10"
 # Data
 data:
   root: "./data"
-  num_workers: 10 # adjust based on your system (it's 10 or fewer for mine before I get warnings)
+  num_workers: 5 # adjust based on your system (it's 10 or fewer for mine before I get warnings)
   batch_size: 128
   augment: true
 
@@ -31,7 +31,7 @@ optim:
 # Scheduler: one of [cosine, onecycle, step, none]
 scheduler:
   name: "cosine"
-  t_max: 20 # used by cosine (small for testing)
+  t_max: 10 # used by cosine (small for testing)
   step_size: 80
   gamma: 0.1
   pct_start: 0.1 # used by OneCycle
