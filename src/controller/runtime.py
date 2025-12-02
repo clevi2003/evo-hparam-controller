@@ -27,7 +27,7 @@ class RuntimeConfig:
     # guards
     nan_guard: bool = True # skip actions producing nans/infs
     max_abs_delta: Optional[float] = None # optional hard clip on |delta log lr| before EMA
-
+    epoch_offset: int = 0
     log_features_json: bool = True
 
 
@@ -104,8 +104,11 @@ class ControllerRuntime(Hook):
 
     def on_batch_end(self, state: State) -> None:
         gs = int(state.get("global_step", 0))
-        # step_in_epoch = int(state.get("batch_idx", 0))
-        # epoch = int(state.get("epoch", 0))
+
+        # apply epoch offset so both features and logs see effective epoch
+        raw_epoch = int(state.get("epoch", 0))
+        if self.cfg.epoch_offset:
+            state["epoch"] = raw_epoch + self.cfg.epoch_offset
 
         # default state flags for other hooks
         state["controller_applied"] = False

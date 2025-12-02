@@ -38,7 +38,7 @@ scheduler:
 
 # Training
 train:
-  epochs: 200 # set to a low number for testing; use 200 for full training
+  epochs: 5 # set to a low number for testing; use 200 for full training
   label_smoothing: 0.0
   grad_clip_norm: null
   deterministic: true

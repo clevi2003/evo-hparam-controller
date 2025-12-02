@@ -133,6 +133,7 @@ class TruncatedTrainingEvaluator:
         self.device = get_device(getattr(train_cfg, "device", None))
         print("DEVICE:", self.device)
         self.cfg = evaluator_cfg or EvaluatorConfig()
+        self.epoch_offset = int(getattr(self.budget_cfg, "start_epoch_offset", 0))
 
         # builders
         self._model_builder = self.cfg.model_builder or (lambda arch, nc: resnet20())
@@ -300,6 +301,7 @@ class TruncatedTrainingEvaluator:
                 action_ema=self.ctrl_cfg.action.ema,
                 nan_guard=True,
                 max_abs_delta=None,
+                epoch_offset=self.epoch_offset,
             ),
             run_id="evolve_eval",
             seed=self.budget_cfg.fixed_seed,
@@ -411,13 +413,15 @@ class TruncatedTrainingEvaluator:
         }
 
     def _make_scalar_logging_hook(self, train_logger, val_logger) -> Hook:
+        epoch_offset = self.epoch_offset  # closure capture
+
         def log_train(s: Dict[str, Any]) -> None:
             if train_logger is None:
                 return
             try:
                 train_logger.log({
                     "global_step": int(s.get("global_step", 0)),
-                    "epoch":       int(s.get("epoch", 0)),
+                    "epoch":       int(s.get("epoch", 0)) + epoch_offset,  # <-- offset
                     "loss":        float(s.get("loss", 0.0) or 0.0),
                     "acc":         float(s.get("acc", 0.0) or 0.0),
                     "lr":          float(s.get("lr", 0.0) or 0.0),
@@ -433,7 +437,7 @@ class TruncatedTrainingEvaluator:
             try:
                 val_logger.log({
                     "global_step": int(s.get("global_step", 0)),
-                    "epoch":       int(s.get("epoch", 0)),
+                    "epoch":       int(s.get("epoch", 0)) + epoch_offset, # include the offset
                     "val_loss":    float(s.get("val_loss", 0.0) or 0.0),
                     "val_acc":     float(s.get("val_acc", 0.0) or 0.0),
                 })
