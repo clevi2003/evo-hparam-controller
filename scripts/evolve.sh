@@ -3,4 +3,4 @@ python -m src.evolution.runner \
   --controller-config configs/controller.yaml \
   --evolve-config configs/evolve.yaml \
   --outdir runs/evolve_long \
-  --generations 50
+  --generations 1

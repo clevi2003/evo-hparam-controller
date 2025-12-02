@@ -22,7 +22,7 @@ model:
 
 # Optimizer
 optim:
-  name: "sgd"
+  name: "adamw"
   lr: 0.1
   momentum: 0.9
   weight_decay: 0.0005
@@ -32,7 +32,7 @@ optim:
 scheduler:
   name: "cosine"
   t_max: 200 # used by cosine (small for testing)
-  step_size: 80
+  step_size: 128
   gamma: 0.1
   pct_start: 0.1 # used by OneCycle
 
