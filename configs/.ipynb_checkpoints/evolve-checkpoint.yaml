@@ -1,0 +1,27 @@
+search:
+  algo: "ga"        # or "es" or "cmaes"
+  pop_size: 3
+  parents: 1
+  mutate_sigma: 0.05
+  elite: 2
+  generations: 2
+
+  warm_start_candidates_dir: "./controllers" # folder with saved controller vectors (.pt)
+  warm_start_num_candidates: 2 # use 2 warm-start candidates (pop_size is 2)
+
+budget:
+  epochs: 2
+  fixed_seed: 2025
+  fixed_subset_pct: 0.01 # use 5% of CIFAR-10 just for a quick test
+  start_from_checkpoint: true # enable ResNet warmstart
+  checkpoint_path: "./final.pt" # path to pretrained ResNet checkpoint
+
+fitness:
+  primary: "auc_val_acc"
+  penalties:
+    lr_volatility_weight: 0.1
+    nan_penalty: 100.0
+
+logging:
+  save_top_k_controllers: 3 # save top k controllers across the whole run
+  save_best_model: true # also save best ResNet model

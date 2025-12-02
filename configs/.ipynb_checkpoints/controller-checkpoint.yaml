@@ -1,0 +1,27 @@
+enabled: true
+update_interval: 5
+action:
+  max_step: 0.2
+  ema: 0.5
+  lr_min: 1.0e-5
+  lr_max: 1.0
+cooldown: 25
+features:
+  - epoch
+  - step_in_epoch
+  - global_step
+  - train_loss
+  - val_loss
+  - train_acc
+  - val_acc
+  - lr_current
+  - ema_loss
+  - ema_acc
+  - d_loss
+  - d_acc
+  - grad_norm
+  - update_ratio
+
+controller_arch:
+  hidden: 32
+  max_step: 0.2

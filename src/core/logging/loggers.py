@@ -231,6 +231,7 @@ TRAIN_SCHEMA = pa.schema(
         pa.field("loss", pa.float32()),
         pa.field("acc", pa.float32()),
         pa.field("lr", pa.float32()),
+        pa.field("lr_base", pa.float32()),
         pa.field("grad_norm", pa.float32()),
         pa.field("grad_norm_ema", pa.float32()),
 
