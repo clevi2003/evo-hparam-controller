@@ -56,7 +56,7 @@ _VALID_FEATURES = {
     "update_ratio",  # ||deltaθ|| / ||θ||
     "clip_events",  # like number of clips this step
     # EMAs/deltas computed here
-    "ema_loss",
+    "train_loss_ema",
     "ema_acc",
     "d_loss",
     "d_acc",
@@ -74,7 +74,7 @@ _NUMERIC_DEFAULTS = {
     "grad_norm": 0.0,
     "update_ratio": 0.0,
     "clip_events": 0.0,
-    "ema_loss": 0.0,
+    "train_loss_ema": 0.0,
     "ema_acc": 0.0,
     "d_loss": 0.0,
     "d_acc": 0.0,
@@ -135,7 +135,7 @@ class FeatureExtractor(Hook):
             self._ema_stats[name] = _EmaStat(alpha=self._ema_alpha)
 
         # Derived EMAs get maintained explicitly
-        self._ema_stats["ema_loss"] = _EmaStat(alpha=self._ema_alpha)
+        self._ema_stats["train_loss_ema"] = _EmaStat(alpha=self._ema_alpha)
         self._ema_stats["ema_acc"] = _EmaStat(alpha=self._ema_alpha)
 
         # Last values to compute deltas
@@ -156,7 +156,7 @@ class FeatureExtractor(Hook):
         # Update EMAs (if value present)
         if train_loss is not None:
             self._ema_stats["train_loss"].update(train_loss)
-            self._ema_stats["ema_loss"].update(train_loss)  
+            self._ema_stats["train_loss_ema"].update(train_loss)
         if train_acc is not None:
             self._ema_stats["train_acc"].update(train_acc)
             self._ema_stats["ema_acc"].update(train_acc)
@@ -183,7 +183,7 @@ class FeatureExtractor(Hook):
             state["d_acc"] = 0.0
 
         # Also mirror EMAs into state
-        state["ema_loss"] = self._ema_stats["ema_loss"].mean if self._ema_stats["ema_loss"].initialized else 0.0
+        state["train_loss_ema"] = self._ema_stats["train_loss_ema"].mean if self._ema_stats["train_loss_ema"].initialized else 0.0
         state["ema_acc"] = self._ema_stats["ema_acc"].mean if self._ema_stats["ema_acc"].initialized else 0.0
         state["ema_grad_norm"] = (
             self._ema_stats["grad_norm"].mean if self._ema_stats["grad_norm"].initialized else 0.0
@@ -265,9 +265,9 @@ class FeatureExtractor(Hook):
         if name == "clip_events":
             return float(state.get("clip_events", 0) or 0)
 
-        if name == "ema_loss":
+        if name == "train_loss_ema":
             # Already mirrored into state in on_batch_end; also available from tracker
-            return float(state.get("ema_loss", 0.0))
+            return float(state.get("train_loss_ema", 0.0))
         if name == "ema_acc":
             return float(state.get("ema_acc", 0.0))
         if name == "d_loss":
@@ -292,7 +292,7 @@ class FeatureExtractor(Hook):
         stat = self._ema_stats.get(name)
         if stat is None:
             # Some features share EMA trackers
-            if name in ("train_loss", "ema_loss", "d_loss"):
+            if name in ("train_loss", "train_loss_ema", "d_loss"):
                 stat = self._ema_stats.get("train_loss")
             elif name in ("train_acc", "ema_acc", "d_acc"):
                 stat = self._ema_stats.get("train_acc")

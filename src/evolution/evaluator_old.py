@@ -16,6 +16,7 @@ from src.controller.lr_scheduler import LrControllerScheduler
 from src.controller.runtime import ControllerRuntime, RuntimeConfig
 from src.controller.serialization import controller_version_hash_from_vector
 from src.controller.serialization import unflatten_params
+from src.core.hooks.common_hooks import LambdaHook
 # hooks and training engine
 from src.core.hooks.hook_base import Hook
 from src.core.hooks.hook_composition import HookList
@@ -23,11 +24,10 @@ from src.training.logging_hooks import _TrainMetricsHook, _ValMetricsHook
 # logging and fitness
 from src.core.logging.loggers import (
     ControllerTickLogger,
-    make_train_csv_logger,
-    make_val_csv_logger,
-    ContextTickLogger,
-    Logger,
+    make_train_parquet_logger,
+    make_val_parquet_logger,
     ContextLogger,
+    ContextTickLogger
 )
 from src.data_.cifar10 import get_dataloaders
 from src.evolution.fitness import RunSummary, score_run, FitnessWeights, auc
@@ -40,10 +40,8 @@ from src.training.optim_sched_factory import build_optimizer, build_baseline_sch
 
 class _CollectEvalPointsHook(Hook):
     """collect (global_step, val_acc) at the end of each evaluation"""
-
     def __init__(self, collector: List[Tuple[int, float]]) -> None:
         self.collector = collector
-
     def on_eval_end(self, state: Dict[str, Any]) -> None:
         val_acc = state.get("val_acc", None)
         if val_acc is not None:
@@ -52,10 +50,8 @@ class _CollectEvalPointsHook(Hook):
 
 class _CollectActionDeltasHook(Hook):
     """collect applied delta(log lr) each time the controller acts"""
-
     def __init__(self, collector: List[float]) -> None:
         self.collector = collector
-
     def on_batch_end(self, state: Dict[str, Any]) -> None:
         if state.get("controller_applied", False):
             d = state.get("controller_delta_applied", None)
@@ -65,7 +61,6 @@ class _CollectActionDeltasHook(Hook):
 
 class _DivergenceGuardHook(Hook):
     """detect nans/infs in loss; sets state['diverged']=True"""
-
     def on_batch_end(self, state: Dict[str, Any]) -> None:
         loss = state.get("loss", None)
         if loss is None:
@@ -94,12 +89,7 @@ class EvaluatorConfig:
 
     # inject fitness weights & static IDs to be stamped on parquet rows
     fitness_weights: Optional[FitnessWeights] = None
-    static_ids: Optional[Dict[str, Any]] = None  # set per-run from runner
-
-    # NEW: shared loggers for the entire evo run (preferred when provided)
-    train_logger: Optional[Logger] = None
-    val_logger: Optional[Logger] = None
-    tick_logger: Optional[ControllerTickLogger] = None
+    static_ids: Optional[Dict[str, Any]] = None  # set per-candidate from runner
 
 
 @dataclass
@@ -112,7 +102,6 @@ class EvalResult:
     budget_used: Dict[str, float] = None
     truncation_reason: str = "complete"
     artifacts: Optional[Dict[str, str]] = None
-
     def __post_init__(self) -> None:
         if self.penalties is None:
             self.penalties = {}
@@ -128,8 +117,8 @@ class EvalResult:
 
 class TruncatedTrainingEvaluator:
     """
-    Run a short, deterministic training budget for a controller candidate vector.
-    Produces a RunSummary used as fitness and logs to shared parquet writers.
+    run a short, deterministic training budget for a controller candidate vector
+    produces a RunSummary used as fitness
     """
 
     def __init__(
@@ -161,28 +150,30 @@ class TruncatedTrainingEvaluator:
             )
         )
 
-        # optional output dir for Parquet logs (if we need to construct writers ourselves)
+        # optional output dir for Parquet logs
         self.out_dir = Path(self.cfg.out_dir) if self.cfg.out_dir else None
         if self.out_dir:
             self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        self._train_logger: Optional[Logger] = self.cfg.train_logger
-        self._val_logger: Optional[Logger] = self.cfg.val_logger
-        self._tick_logger: Optional[ControllerTickLogger] = self.cfg.tick_logger
+        # persistent loggers (shared across all candidates)
+        self.out_dir = Path(self.cfg.out_dir) if self.cfg.out_dir is not None else None
+        self._train_logger = None
+        self._val_logger = None
+        self._ticks_logger = None
+
+        base_static = dict(self.cfg.static_ids or {})
 
         if self.out_dir is not None and self.cfg.write_train_val_logs:
-            if self._train_logger is None:
-                # CSV fallback
-                self._train_logger = make_train_csv_logger(self.out_dir / "logs_train.csv")
-            if self._val_logger is None:
-                self._val_logger = make_val_csv_logger(self.out_dir / "logs_val.csv")
+            from src.core.logging.loggers import make_train_parquet_logger, make_val_parquet_logger, ContextLogger
+            base_train = make_train_parquet_logger(self.out_dir / "logs_train.parquet")
+            base_val = make_val_parquet_logger(self.out_dir / "logs_val.parquet")
+            # ContextLogger injects static fields; we’ll update them per-candidate later
+            self._train_logger = ContextLogger(base_train, base_static)
+            self._val_logger = ContextLogger(base_val, base_static)
 
         if self.out_dir is not None and self.cfg.write_controller_ticks:
-            if self._tick_logger is None:
-                # CSV fallback
-                self._tick_logger = ControllerTickLogger.to_csv(
-                    self.out_dir / "controller_calls.csv"
-                )
+            base_tick = ControllerTickLogger.to_parquet(self.out_dir / "controller_calls.parquet")
+            self._ticks_logger = ContextTickLogger(base_tick, base_static)
 
         # fitness weights defaults
         self.fitness_weights: FitnessWeights = self.cfg.fitness_weights or FitnessWeights(
@@ -300,16 +291,23 @@ class TruncatedTrainingEvaluator:
             lr_max=self.ctrl_cfg.action.lr_max,
         )
 
+        # parquet writers (wrapped to inject IDs)
         # merge external static_ids with a computed controller_version from the vector.
         version_tag = controller_version_hash_from_vector(controller_vector)
         merged_ids: Dict[str, Any] = dict(self.cfg.static_ids or {})
-        merged_ids.update(static_ids or {})  # <- generation, individual, candidate_id, etc.
+        merged_ids.update(static_ids or {})
         merged_ids.setdefault("controller_version", version_tag)
 
-        # per-candidate tick logger view (injects static fields into each tick row)
         ticks_logger = None
-        if self._tick_logger is not None and self.cfg.write_controller_ticks:
-            ticks_logger = ContextTickLogger(self._tick_logger, static_fields=merged_ids)
+        train_logger = None
+        val_logger = None
+        if self.out_dir and self.cfg.write_controller_ticks:
+            # use ContextTickLogger so runtime can call .log_tick(...)
+            base_tick = ControllerTickLogger.to_parquet(self.out_dir / "controller_calls.parquet")
+            ticks_logger = ContextTickLogger(base_tick, static_fields=merged_ids)
+        if self.out_dir and self.cfg.write_train_val_logs:
+            train_logger = ContextLogger(make_train_parquet_logger(self.out_dir / "logs_train.parquet"), merged_ids)
+            val_logger = ContextLogger(make_val_parquet_logger(self.out_dir / "logs_val.parquet"), merged_ids)
 
         runtime = ControllerRuntime(
             controller=controller,
@@ -335,55 +333,30 @@ class TruncatedTrainingEvaluator:
         val_curve: List[Tuple[int, float]] = []
         action_stream: List[float] = []
 
-        collectors = HookList(
-            [
-                extractor,
-                runtime,
-                _CollectEvalPointsHook(val_curve),
-                _CollectActionDeltasHook(action_stream),
-                _DivergenceGuardHook(),
-            ]
-        )
+        collectors = HookList([
+            extractor,
+            runtime,
+            _CollectEvalPointsHook(val_curve),
+            _CollectActionDeltasHook(action_stream),
+            _DivergenceGuardHook(),
+        ])
 
-        metric_hooks: List[Hook] = []
-
-        if self._train_logger is not None and self.cfg.write_train_val_logs:
-            epoch_offset = self.epoch_offset
-            # per-candidate contextual logger
-            train_ctx = ContextLogger(self._train_logger, static_fields=merged_ids)
-
-            def train_writer(row: Dict[str, Any]) -> None:
-                r: Dict[str, Any] = dict(row or {})
-
-                # apply epoch offset if present
-                if "epoch" in r and r["epoch"] is not None:
-                    try:
-                        r["epoch"] = int(r["epoch"]) + epoch_offset
-                    except Exception:
-                        pass
-
-                ep = r.get("epoch", None)
-
-                # IDs come from train_ctx.static_fields; we only pass metrics here
-                train_ctx.log(r)
-
-            metric_hooks.append(
-                _TrainMetricsHook(
-                    writer_like=train_writer,
-                    log_interval=getattr(self.train_cfg.log, "log_interval", 100),
+        # scalar parquet logging via hooks
+        if (train_logger is not None) or (val_logger is not None):
+            metric_hooks = []
+            if train_logger is not None:
+                # wrap ContextLogger.log into a writer-like callable to match its interface
+                train_writer = lambda row: train_logger.log(row)
+                metric_hooks.append(
+                    _TrainMetricsHook(
+                        writer_like=train_writer,
+                        log_interval=getattr(self.train_cfg.log, "log_interval", 100),
+                    )
                 )
-            )
+            if val_logger is not None:
+                val_writer = lambda row: val_logger.log(row)
+                metric_hooks.append(_ValMetricsHook(writer_like=val_writer))
 
-        if self._val_logger is not None and self.cfg.write_train_val_logs:
-            val_ctx = ContextLogger(self._val_logger, static_fields=merged_ids)
-
-            def val_writer(row: Dict[str, Any]) -> None:
-                r: Dict[str, Any] = dict(row or {})
-                val_ctx.log(r)
-
-            metric_hooks.append(_ValMetricsHook(writer_like=val_writer))
-
-        if metric_hooks:
             collectors.add(HookList(metric_hooks))
 
         loss_fn = torch.nn.CrossEntropyLoss()
@@ -405,20 +378,22 @@ class TruncatedTrainingEvaluator:
             cfg=self.train_cfg,
         )
 
-        # run truncated training budget; flush shared loggers but DO NOT close them
+        # ensure parquet writers close even if training crashes
         try:
             summary = trainer.fit()
         finally:
-            for w in (self._train_logger, self._val_logger, self._tick_logger):
-                if w is None:
-                    continue
-                flush_fn = getattr(w, "flush", None)
-                if callable(flush_fn):
-                    try:
-                        flush_fn()
-                    except Exception as e:
-                        print("WARNING: failed to flush logger:", e)
-                        pass
+            for w in (train_logger, val_logger, ticks_logger):
+                try:
+                    if w is not None and hasattr(w, "close"):
+                        try:
+                            w.flush()
+                        except Exception as e:
+                            print("WARNING: failed to flush logger:\n", e)
+                            pass
+                        w.close()
+                except Exception as e:
+                    print("WARNING: failed to close logger:\n", e)
+                    pass
 
         final_val = float(summary.get("final_val_acc", 0.0))
         diverged = (len(val_curve) == 0) or math.isnan(final_val) or math.isinf(final_val)
@@ -470,3 +445,41 @@ class TruncatedTrainingEvaluator:
                 "total_epochs": float(run_summary.total_epochs),
             },
         }
+
+    def _make_scalar_logging_hook(self, train_logger, val_logger) -> Hook:
+        epoch_offset = self.epoch_offset  # closure capture
+
+        def log_train(s: Dict[str, Any]) -> None:
+            if train_logger is None:
+                return
+            try:
+                train_logger.log({
+                    "global_step": int(s.get("global_step", 0)),
+                    "epoch":       int(s.get("epoch", 0)) + epoch_offset,  # <-- offset
+                    "loss":        float(s.get("loss", 0.0) or 0.0),
+                    "acc":         float(s.get("acc", 0.0) or 0.0),
+                    "lr":          float(s.get("lr", 0.0) or 0.0),
+                    "grad_norm":   float(s.get("grad_norm", 0.0) or 0.0),
+                })
+            except Exception as e:
+                print("WARNING: failed to log train:\n", e)
+                pass
+
+        def log_val(s: Dict[str, Any]) -> None:
+            if val_logger is None:
+                return
+            try:
+                val_logger.log({
+                    "global_step": int(s.get("global_step", 0)),
+                    "epoch":       int(s.get("epoch", 0)) + epoch_offset, # include the offset
+                    "val_loss":    float(s.get("val_loss", 0.0) or 0.0),
+                    "val_acc":     float(s.get("val_acc", 0.0) or 0.0),
+                })
+            except Exception as e:
+                print("WARNING: failed to log val:\n", e)
+                pass
+
+        return HookList([
+            LambdaHook(on_batch_end=log_train),
+            LambdaHook(on_eval_end=log_val),
+        ])

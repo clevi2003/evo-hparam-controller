@@ -1,11 +1,11 @@
 enabled: true
-update_interval: 5
+update_interval: 1
 action:
   max_step: 0.2
   ema: 0.5
   lr_min: 1.0e-5
   lr_max: 1.0
-cooldown: 25
+cooldown: 5
 features:
   - epoch
   - step_in_epoch
@@ -15,7 +15,7 @@ features:
   - train_acc
   - val_acc
   - lr_current
-  - ema_loss
+  - train_loss_ema
   - ema_acc
   - d_loss
   - d_acc

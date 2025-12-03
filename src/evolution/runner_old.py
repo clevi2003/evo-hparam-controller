@@ -10,14 +10,6 @@ import numpy as np
 import torch
 from uuid import uuid4
 import shutil
-from src.core.logging.loggers import (
-    ControllerTickLogger,
-    make_train_csv_logger,
-    make_val_csv_logger,
-    ContextTickLogger,
-    Logger,
-    make_controller_calls_csv_logger,
-)
 
 from src.core.config import load_train_cfg, load_controller_cfg, load_evolve_cfg
 from src.utils.seed_device import seed_everything
@@ -137,38 +129,26 @@ def run(args: argparse.Namespace) -> None:
         lr_volatility_weight=0.10,
         nan_penalty=100.0,
     )
-    # shared evo-run loggers
-    train_log = None
-    val_log = None
-    tick_log = None
-    if artifacts_dir is not None and not args.no_artifacts:
-        train_log = make_train_csv_logger(artifacts_dir / "logs_train.csv")
-        val_log = make_val_csv_logger(artifacts_dir / "logs_val.csv")
-        tick_log = make_controller_calls_csv_logger(artifacts_dir / "controller_calls.csv")
-
     eval_cfg = EvaluatorConfig(
         out_dir=artifacts_dir,
         write_train_val_logs=True,
         write_controller_ticks=True,
         checkpoint_io=ckpt_io,
         fitness_weights=fitness_w,
+        # base IDs (can be extended per-candidate below)
         static_ids={
             "train_run_id": str(getattr(run_context, "run_id", "")),
             "mode": "evolve",
             "exp_name": getattr(train_cfg, "exp_name", getattr(evo_cfg, "exp_name", "")) or "",
         },
         save_candidate_models=getattr(evo_cfg.logging, "save_best_model", False),
-        # NEW: inject shared loggers
-        train_logger=train_log,
-        val_logger=val_log,
-        tick_logger=tick_log,
     )
     evaluator = TruncatedTrainingEvaluator(
         train_cfg=train_cfg,
         ctrl_cfg=ctrl_cfg,
         budget_cfg=evo_cfg.budget,
         device=device,
-        evaluator_cfg=eval_cfg,
+        evaluator_cfg=eval_cfg
     )
 
     # evo log writers
@@ -284,10 +264,7 @@ def run(args: argparse.Namespace) -> None:
 
                 # static IDs for this candidate (stamped on parquet rows)
                 static_ids = dict(eval_cfg.static_ids or {})
-                base_train_run_id = str(getattr(run_context, "run_id", ""))
                 static_ids.update({
-                    # give EACH candidate its own logical "training run id"
-                    "train_run_id": f"{base_train_run_id}_g{gen:04d}_i{idx:04d}",
                     "candidate_id": candidate_id,
                     "generation": int(gen),
                     "individual": int(idx),
@@ -469,8 +446,8 @@ def run(args: argparse.Namespace) -> None:
                 pass
         else:
             tqdm.write("[evolve] No valid candidates evaluated.")
+
     finally:
-        # close the evo-specific loggers (different files)
         try:
             evo_cand_logger.close()
         except Exception:
@@ -479,15 +456,7 @@ def run(args: argparse.Namespace) -> None:
             evo_gen_logger.close()
         except Exception:
             pass
-        for shared_log in (train_log, val_log, tick_log):
-            if shared_log is None:
-                continue
-            flush_fn = getattr(shared_log, "flush", None)
-            if callable(flush_fn):
-                try:
-                    flush_fn()
-                except Exception:
-                    pass
+        close_all_parquet_writers()
         run_context.finalize()
 
 def main():
