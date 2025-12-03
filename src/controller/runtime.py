@@ -133,6 +133,7 @@ class ControllerRuntime(Hook):
             feat = feat.unsqueeze(0) # [1, F] for batch-1 forward
 
             # controller forward delta log lr (raw)
+            # print(f"ControllerRuntime: computing delta log lr at step {gs} with features {feat.cpu().numpy()}")
             delta_raw_t = self.controller(feat) # expect shape [1] or [1, 1]
             if isinstance(delta_raw_t, (tuple, list)):
                 delta_raw_t = delta_raw_t[0]

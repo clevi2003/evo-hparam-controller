@@ -194,8 +194,16 @@ class ControllerTickLogger:
         return cls(appender=app, fields=list(schema.names))
 
     @classmethod
-    def to_csv(cls, path: Union[str, Path], fields: Optional[Sequence[str]] = None) -> "ControllerTickLogger":
-        f = list(fields) if fields is not None else list(DEFAULT_CONTROLLER_TICK_FIELDS)
+    def to_csv(
+            cls,
+            path: Union[str, Path],
+            fields: Optional[Sequence[str]] = None,
+    ) -> "ControllerTickLogger":
+        # default: full schema, including COMMON_ID_FIELDS
+        if fields is None:
+            f = list(CONTROLLER_TICK_SCHEMA.names)
+        else:
+            f = list(fields)
         return cls(appender=CSVAppender(path, f), fields=f)
 
     @classmethod
@@ -358,6 +366,10 @@ def make_controller_calls_logger(path: Union[str, Path],
         return ControllerTickLogger.to_parquet_dir(path, schema=CONTROLLER_TICK_SCHEMA, **kwargs)
     else:
         return ControllerTickLogger.to_parquet(path, schema=CONTROLLER_TICK_SCHEMA, **kwargs)
+
+def make_controller_calls_csv_logger(path: Union[str, Path]) -> ControllerTickLogger:
+    return ControllerTickLogger.to_csv(path)
+
 
 def make_train_logger(path: Union[str, Path]) -> Logger:
     return Logger(ParquetAppender(path, schema=TRAIN_SCHEMA, buffer_rows=1024))
