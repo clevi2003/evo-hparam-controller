@@ -354,7 +354,8 @@ EVO_GEN_SUMMARY_SCHEMA = pa.schema(
     ])
 
 def make_evo_candidates_logger(path: Union[str, Path]) -> Logger:
-    return Logger(ParquetAppender(path, schema=EVO_CANDIDATES_SCHEMA, buffer_rows=1024))
+    # return Logger(ParquetAppender(path, schema=EVO_CANDIDATES_SCHEMA, buffer_rows=1024))
+    return Logger(CSVAppender(path, EVO_CANDIDATES_SCHEMA.names))
 
 def make_gen_summary_logger(path: Union[str, Path]) -> Logger:
     return Logger(ParquetAppender(path, schema=EVO_GEN_SUMMARY_SCHEMA, buffer_rows=256))

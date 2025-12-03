@@ -18,13 +18,13 @@ def paths_for_run(run_dir: Path) -> Dict[str, Path]:
     """
     run_dir = Path(run_dir)
     return {
-        "train_log": run_dir / "logs_train.parquet",
-        "val_log": run_dir / "logs_val.parquet",
-        "controller_calls": run_dir / "controller_calls.parquet",
+        "train_log": run_dir / "logs_train.csv",
+        "val_log": run_dir / "logs_val.csv",
+        "controller_calls": run_dir / "controller_calls.csv",
         "checkpoints": run_dir / "checkpoints",
         "graphs": run_dir / "graphs",
         "evolution": run_dir / "evolution",
-        "evo_candidates": run_dir / "evolution" / "candidates.parquet",
+        "evo_candidates": run_dir / "evolution" / "candidates.csv",
         "evo_gen_summary": run_dir / "evolution" / "gen_summary.parquet",
     }
 
