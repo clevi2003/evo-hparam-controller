@@ -11,7 +11,7 @@ exp_name: "resnet20_cifar10"
 # Data
 data:
   root: "./data"
-  num_workers: 16
+  num_workers: 10 # adjust based on your system (it's 10 or fewer for mine before I get warnings)
   batch_size: 128
   augment: true
 
@@ -38,7 +38,7 @@ scheduler:
 
 # Training
 train:
-  epochs: 200 # set to a low number for testing; use 200 for full training
+  epochs: 5 # set to a low number for testing; use 200 for full training
   label_smoothing: 0.0
   grad_clip_norm: null
   deterministic: true
