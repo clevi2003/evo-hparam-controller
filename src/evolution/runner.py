@@ -60,7 +60,10 @@ def _build_strategy(evo_cfg) -> Strategy:
 
 def _load_warmstart_vector(path: Path) -> np.ndarray:
     """Load a controller vector from various checkpoint formats."""
-    payload = torch.load(path, map_location="cpu")
+    # These checkpoints are created by your own code, so we can safely
+    # disable weights_only to allow full unpickling.
+    # payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload = torch.load(path, map_location="gpu", weights_only=False)
 
     # our save_vector format
     if isinstance(payload, dict) and "vector" in payload:
@@ -87,7 +90,6 @@ def _load_warmstart_vector(path: Path) -> np.ndarray:
         raise ValueError(f"Unsupported warm-start payload format in {path}")
 
     return to_numpy(vec_t.view(-1))
-
 
 def run(args: argparse.Namespace) -> None:
     # load configs
